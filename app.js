@@ -1890,7 +1890,15 @@ function renderSavedAlerts() {
       <button type="button" class="saved-alert-delete" data-delete-alert="${esc(alertStorageKey(alert))}" aria-label="${esc(alert.routeName || '')}번 알림 삭제">삭제</button>
     </article>`).join('');
   els.savedAlerts.querySelectorAll('[data-delete-alert]').forEach(button => {
-    button.addEventListener('click', () => removeSavedAlert(button.dataset.deleteAlert));
+    button.addEventListener('click', async event => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = button.dataset.deleteAlert;
+      if (!key || button.disabled) return;
+      button.disabled = true;
+      button.textContent = '삭제 중…';
+      await removeSavedAlert(key);
+    });
   });
 }
 
@@ -1920,19 +1928,50 @@ function loadAlertFormForCurrentRoute() {
 
 async function removeSavedAlert(key) {
   const alert = state.savedAlerts.find(item => alertStorageKey(item) === key);
-  if (!alert) return;
+  if (!alert) {
+    renderSavedAlerts();
+    return;
+  }
+
+  // Firebase 상태나 네트워크 오류 때문에 삭제 버튼이 막히지 않도록
+  // 먼저 기기 저장소에서 즉시 제거하고 화면을 갱신한다.
   try {
-    if (state.firebase?.firestore && state.firebase?.user) {
-      const documentId = alert._docId || `${state.firebase.user.uid}_${alert.routeId}_${alert.stationId}`;
-      await deleteDoc(doc(state.firebase.firestore, 'busAlerts', documentId));
+    const remaining = state.savedAlerts.filter(item => alertStorageKey(item) !== key);
+    writeSavedAlerts(remaining);
+  } catch (localError) {
+    console.error('local alert delete failed', localError);
+    renderSavedAlerts();
+    toast(`기기 알림 삭제 실패: ${localError.message}`, 4500);
+    return;
+  }
+
+  toast(`${alert.routeName || '버스'}번 알림을 기기에서 삭제했습니다.`);
+  if (state.route && state.origin && key === `${state.route.routeId}_${state.origin.stationId}`) {
+    els.alertInfo.textContent = `${state.route.routeName}번 알림이 삭제되었습니다. 새 조건으로 다시 저장할 수 있습니다.`;
+  }
+
+  // 서버 저장본은 별도로 정리한다. 실패해도 기기에서 삭제한 항목을 되살리지 않는다.
+  if (!state.firebase?.firestore || !state.firebase?.user) return;
+
+  const documentId = alert._docId || `${state.firebase.user.uid}_${alert.routeId}_${alert.stationId}`;
+  const alertRef = doc(state.firebase.firestore, 'busAlerts', documentId);
+  try {
+    await deleteDoc(alertRef);
+  } catch (remoteError) {
+    console.warn('remote alert delete failed; trying to disable it', remoteError);
+    try {
+      // 예약 함수는 enabled == true 문서만 조회하므로 삭제가 일시 실패하면 우선 비활성화한다.
+      await setDoc(alertRef, {
+        enabled: false,
+        armed: false,
+        token: '',
+        updatedAt: serverTimestamp()
+      }, { merge: true });
+      toast(`${alert.routeName || '버스'}번은 기기에서 삭제했고 서버 알림도 중지했습니다.`, 4200);
+    } catch (disableError) {
+      console.warn('remote alert disable failed', disableError);
+      toast('기기에서는 삭제됐지만 서버 정리에 실패했습니다. 인터넷 연결 후 같은 버스를 저장했다가 다시 삭제해 주세요.', 6500);
     }
-    writeSavedAlerts(state.savedAlerts.filter(item => alertStorageKey(item) !== key));
-    toast(`${alert.routeName || '버스'}번 알림을 삭제했습니다.`);
-    if (state.route && state.origin && key === `${state.route.routeId}_${state.origin.stationId}`) {
-      els.alertInfo.textContent = `${state.route.routeName}번 알림이 삭제되었습니다. 새 조건으로 다시 저장할 수 있습니다.`;
-    }
-  } catch (error) {
-    toast(`알림 삭제 실패: ${error.message}`, 4000);
   }
 }
 
@@ -2130,7 +2169,7 @@ async function initFirebase() {
   try {
     const configResponse = await fetch('/api/config', { cache: 'no-store' });
     state.firebaseConfig = await configResponse.json();
-    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.1.0', { scope: '/' });
+    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.2.0', { scope: '/' });
 
     if (!state.firebaseConfig.backgroundPushConfigured) {
       els.pushState.textContent = '화면 켤 때만';
