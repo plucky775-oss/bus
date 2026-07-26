@@ -25,8 +25,8 @@ const firebaseConfig = {
   appId: ${js(config.appId)}
 };
 
-const CACHE = 'hogye-bus-alert-v20';
-const CORE = ['/', '/index.html', '/styles.css', '/app.js', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
+const CACHE = 'hogye-bus-alert-v21';
+const CORE = ['/', '/index.html', '/styles.css?v=2.1.0', '/app.js?v=2.1.0', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(CORE)).catch(() => undefined));
@@ -58,7 +58,7 @@ if (firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.messagin
       tag: data.tag || 'bus-alert',
       requireInteraction: true,
       silent: data.alertMode === 'pushOnly',
-      vibrate: data.alertMode === 'pushOnly' ? [] : [300, 120, 300, 120, 500],
+      vibrate: ['push', 'vibratePush'].includes(data.alertMode || 'push') ? [300, 120, 300, 120, 500] : [],
       data: { url: data.url || '/' }
     });
   });
