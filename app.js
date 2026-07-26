@@ -1,6 +1,6 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-app.js';
 import { getAuth, signInAnonymously } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js';
-import { getFirestore, doc, setDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
+import { getFirestore, doc, setDoc, deleteDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js';
 import { getMessaging, getToken, onMessage, isSupported } from 'https://www.gstatic.com/firebasejs/10.13.2/firebase-messaging.js';
 
 const $ = (id) => document.getElementById(id);
@@ -35,7 +35,10 @@ const state = {
   lastLiveUpdatedAt: 0,
   routeSearchId: 0,
   routeSearchAbortController: null,
-  nearbyAbortController: null
+  nearbyAbortController: null,
+  savedAlerts: [],
+  savedAlertPoller: null,
+  savedAlertAlarmKeys: new Map()
 };
 
 const els = {
@@ -47,12 +50,14 @@ const els = {
   busCount: $('busCount'), mapNote: $('mapNote'), nearbyOrigin: $('nearbyOrigin'),
   toast: $('toast'), alarmAudio: $('alarmAudio'), alertInfo: $('alertInfo'),
   refreshLive: $('refreshLive'), refreshLiveLabel: $('refreshLiveLabel'),
-  nearbyStatus: $('nearbyStatus'), liveVehicles: $('liveVehicles'), liveUpdated: $('liveUpdated')
+  nearbyStatus: $('nearbyStatus'), liveVehicles: $('liveVehicles'), liveUpdated: $('liveUpdated'),
+  savedAlerts: $('savedAlerts'), savedAlertCount: $('savedAlertCount'), alertRouteChip: $('alertRouteChip')
 };
 
 const DESTINATION_WALK_RADIUS_METERS = 800;
-const NEARBY_RESULT_RADIUS_METERS = 1200;
-const STORED_LOCATION_MAX_AGE_MS = 30 * 60 * 1000;
+const NEARBY_RESULT_RADIUS_METERS = 1800;
+const STORED_LOCATION_MAX_AGE_MS = 15 * 60 * 1000;
+const SAVED_ALERTS_KEY = 'hogyeBusAlertsV2';
 
 function toast(message, ms = 2600) {
   els.toast.textContent = message;
@@ -504,44 +509,50 @@ function normalizeNearbyStations(items, latitude, longitude) {
 }
 
 async function fetchNearbyStations(latitude, longitude, signal) {
-  const queryPoint = async (lat, lng) => api('stationAround', {
+  const queryPoint = async (lat, lng) => apiWithRetry('stationAround', {
     x: Number(lng).toFixed(7),
     y: Number(lat).toFixed(7)
-  }, { signal, fresh: true, timeout: 18000 });
+  }, { signal, fresh: true, timeout: 20000 }, 2);
+
+  const offsetPoint = (northMeters, eastMeters) => {
+    const lat = latitude + northMeters / 111320;
+    const lng = longitude + eastMeters / (111320 * Math.max(.3, Math.cos(latitude * Math.PI / 180)));
+    return [lat, lng];
+  };
 
   const collected = [];
   const failures = [];
-  const runPoint = async ([lat, lng]) => {
-    try {
-      const result = await queryPoint(lat, lng);
-      collected.push(...(result.items || []));
-    } catch (error) {
-      if (error?.name === 'AbortError') throw error;
-      failures.push(error);
-    }
+  const queryPoints = async points => {
+    await mapWithConcurrency(points, 3, async ([lat, lng]) => {
+      try {
+        const result = await queryPoint(lat, lng);
+        collected.push(...(result.items || []));
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        failures.push(error);
+      }
+    });
     return normalizeNearbyStations(collected, latitude, longitude);
   };
 
-  // 공식 주변정류소 API는 요청 좌표 반경 500m를 반환한다. 먼저 실제 GPS 좌표 한 번만 조회한다.
-  let normalized = await runPoint([latitude, longitude]);
-  if (normalized.length >= 3) return normalized;
+  // 1차: 실제 GPS 지점. 응답 태그가 busStationList/busStationAroundList 어느 쪽이어도 서버에서 처리한다.
+  let normalized = await queryPoints([offsetPoint(0, 0)]);
+  if (normalized.length >= 5) return normalized;
 
-  // GPS 오차 또는 500m 경계에 걸린 경우에만 주변 좌표를 낮은 동시성으로 보조 조회한다.
-  const latOffset = 0.0032;
-  const lngOffset = 0.0040;
-  const points = [
-    [latitude + latOffset, longitude],
-    [latitude - latOffset, longitude],
-    [latitude, longitude + lngOffset],
-    [latitude, longitude - lngOffset],
-    [latitude + latOffset, longitude + lngOffset],
-    [latitude + latOffset, longitude - lngOffset],
-    [latitude - latOffset, longitude + lngOffset],
-    [latitude - latOffset, longitude - lngOffset]
+  // 2차: 500m 검색 원을 서로 겹치도록 약 420m 간격으로 조회한다.
+  const inner = [
+    offsetPoint(420, 0), offsetPoint(-420, 0), offsetPoint(0, 420), offsetPoint(0, -420),
+    offsetPoint(420, 420), offsetPoint(420, -420), offsetPoint(-420, 420), offsetPoint(-420, -420)
   ];
+  normalized = await queryPoints(inner);
+  if (normalized.length >= 8) return normalized;
 
-  await mapWithConcurrency(points, 2, runPoint);
-  normalized = normalizeNearbyStations(collected, latitude, longitude);
+  // 3차: GPS 오차가 크거나 정류장이 500m 경계 밖에 있을 때 1km권까지 보조 조회한다.
+  const outer = [
+    offsetPoint(840, 0), offsetPoint(-840, 0), offsetPoint(0, 840), offsetPoint(0, -840),
+    offsetPoint(840, 840), offsetPoint(840, -840), offsetPoint(-840, 840), offsetPoint(-840, -840)
+  ];
+  normalized = await queryPoints(outer);
   if (!normalized.length && failures.length) throw failures[0];
   return normalized;
 }
@@ -902,6 +913,9 @@ async function chooseRoute(pair) {
     ? `${esc(state.destination.stationName)} 인근 · ${esc(state.route.destinationStationName)} 하차 후 도보 약 ${Math.max(10, Math.round(state.route.destinationWalkDistance / 10) * 10)}m`
     : esc(state.destination.stationName);
   els.chosenRoute.innerHTML = `<div class="chosen-route-main"><span class="chosen-route-number">${esc(state.route.routeName)}</span><span><strong>${esc(state.route.routeDestName || '선택 노선')} 방면</strong><p>${esc(state.origin.stationName)} → ${destinationGuide}</p></span></div><small class="chosen-route-hint">실제 노선 전체와 운행 차량을 표시합니다. 목적지와 같은 정류장이 없으면 도보 800m 이내의 가장 가까운 하차 정류장도 함께 찾습니다.</small>`;
+  if (els.alertRouteChip) els.alertRouteChip.innerHTML = `<b>${esc(state.route.routeName)}번</b><span>${esc(state.origin.stationName)} 정류장 알림</span>`;
+  $('saveAlert').textContent = `${state.route.routeName}번 알림 저장`;
+  loadAlertFormForCurrentRoute();
   if (els.liveVehicles) els.liveVehicles.innerHTML = '<div class="empty">노선과 운행 차량을 불러오는 중…</div>';
   els.liveSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
   await loadLive(true, { manual: true });
@@ -1685,18 +1699,135 @@ function renderMap(fit = false) {
   setTimeout(() => map.invalidateSize(), 100);
 }
 
+
+function alertStorageKey(alert) {
+  return `${String(alert?.routeId || '')}_${String(alert?.stationId || '')}`;
+}
+
+function readSavedAlerts() {
+  try {
+    let alerts = JSON.parse(localStorage.getItem(SAVED_ALERTS_KEY) || '[]');
+    if (!Array.isArray(alerts)) alerts = [];
+    const legacy = JSON.parse(localStorage.getItem('hogyeBusAlert') || 'null');
+    if (legacy?.routeId && legacy?.stationId) {
+      const legacyKey = alertStorageKey(legacy);
+      if (!alerts.some(alert => alertStorageKey(alert) === legacyKey)) alerts.push({ ...legacy, _key: legacyKey });
+      localStorage.removeItem('hogyeBusAlert');
+    }
+    return alerts
+      .filter(alert => alert?.routeId && alert?.stationId)
+      .map(alert => ({ ...alert, _key: alert._key || alertStorageKey(alert) }))
+      .sort((a, b) => String(a.routeName || '').localeCompare(String(b.routeName || ''), 'ko'));
+  } catch {
+    return [];
+  }
+}
+
+function writeSavedAlerts(alerts) {
+  state.savedAlerts = [...alerts].sort((a, b) => String(a.routeName || '').localeCompare(String(b.routeName || ''), 'ko'));
+  localStorage.setItem(SAVED_ALERTS_KEY, JSON.stringify(state.savedAlerts));
+  renderSavedAlerts();
+}
+
+function upsertSavedAlert(payload) {
+  const key = alertStorageKey(payload);
+  const next = state.savedAlerts.filter(alert => alertStorageKey(alert) !== key);
+  next.push({ ...payload, _key: key, savedAt: Date.now() });
+  writeSavedAlerts(next);
+}
+
+function alertDaysText(days = []) {
+  const labels = ['일', '월', '화', '수', '목', '금', '토'];
+  const normalized = [...new Set((days || []).map(Number))].sort((a, b) => a - b);
+  if (normalized.length === 7) return '매일';
+  if (normalized.length === 5 && [1, 2, 3, 4, 5].every(day => normalized.includes(day))) return '평일';
+  return normalized.map(day => labels[day]).join('·') || '요일 없음';
+}
+
+function renderSavedAlerts() {
+  if (!els.savedAlerts || !els.savedAlertCount) return;
+  els.savedAlertCount.textContent = `${state.savedAlerts.length}개`;
+  if (!state.savedAlerts.length) {
+    els.savedAlerts.innerHTML = '<div class="empty compact-empty">저장된 버스 알림이 없습니다.</div>';
+    return;
+  }
+  els.savedAlerts.innerHTML = state.savedAlerts.map(alert => `
+    <article class="saved-alert-row" data-alert-key="${esc(alertStorageKey(alert))}">
+      <span class="saved-route-number">${esc(alert.routeName || '버스')}</span>
+      <div class="saved-alert-copy">
+        <strong>${esc(alert.stationName || '탑승 정류장')}</strong>
+        <span>${esc(alert.startTime || '00:00')}–${esc(alert.endTime || '23:59')} · ${esc(alertDaysText(alert.days))} · ${number(alert.leadStops, 3)}정거장 전</span>
+      </div>
+      <button type="button" class="saved-alert-delete" data-delete-alert="${esc(alertStorageKey(alert))}" aria-label="${esc(alert.routeName || '')}번 알림 삭제">삭제</button>
+    </article>`).join('');
+  els.savedAlerts.querySelectorAll('[data-delete-alert]').forEach(button => {
+    button.addEventListener('click', () => removeSavedAlert(button.dataset.deleteAlert));
+  });
+}
+
+function applyAlertToForm(alert) {
+  if (!alert) return;
+  $('startTime').value = alert.startTime || '15:00';
+  $('endTime').value = alert.endTime || '23:00';
+  $('leadStops').value = String(number(alert.leadStops, 3));
+  $('alertMode').value = alert.alertMode || 'push';
+  $('alertEnabled').checked = alert.enabled !== false;
+  const activeDays = new Set((alert.days || []).map(Number));
+  document.querySelectorAll('.day').forEach(button => button.classList.toggle('active', activeDays.has(Number(button.dataset.day))));
+}
+
+function loadAlertFormForCurrentRoute() {
+  if (!state.route || !state.origin) return;
+  const key = `${state.route.routeId}_${state.origin.stationId}`;
+  const saved = state.savedAlerts.find(alert => alertStorageKey(alert) === key);
+  if (saved) {
+    applyAlertToForm(saved);
+    els.alertInfo.textContent = `${saved.routeName}번에 저장한 알림 설정을 불러왔습니다. 수정 후 다시 저장할 수 있습니다.`;
+  } else {
+    els.alertInfo.textContent = `${state.route.routeName}번 알림을 새로 설정합니다. 다른 버스 알림과 별도로 저장됩니다.`;
+  }
+}
+
+async function removeSavedAlert(key) {
+  const alert = state.savedAlerts.find(item => alertStorageKey(item) === key);
+  if (!alert) return;
+  try {
+    if (state.firebase?.firestore && state.firebase?.user) {
+      const documentId = alert._docId || `${state.firebase.user.uid}_${alert.routeId}_${alert.stationId}`;
+      await deleteDoc(doc(state.firebase.firestore, 'busAlerts', documentId));
+    }
+    writeSavedAlerts(state.savedAlerts.filter(item => alertStorageKey(item) !== key));
+    toast(`${alert.routeName || '버스'}번 알림을 삭제했습니다.`);
+    if (state.route && state.origin && key === `${state.route.routeId}_${state.origin.stationId}`) {
+      els.alertInfo.textContent = `${state.route.routeName}번 알림이 삭제되었습니다. 새 조건으로 다시 저장할 수 있습니다.`;
+    }
+  } catch (error) {
+    toast(`알림 삭제 실패: ${error.message}`, 4000);
+  }
+}
+
 function selectedDays() {
   return [...document.querySelectorAll('.day.active')].map(btn => Number(btn.dataset.day));
 }
 
-function withinLocalSchedule() {
+function withinAlertSchedule(alert) {
   const now = new Date();
   const day = now.getDay();
   const hhmm = now.toTimeString().slice(0, 5);
-  const start = $('startTime').value || '00:00';
-  const end = $('endTime').value || '23:59';
+  const start = alert?.startTime || '00:00';
+  const end = alert?.endTime || '23:59';
+  const days = Array.isArray(alert?.days) ? alert.days.map(Number) : [];
   const timeOk = start <= end ? hhmm >= start && hhmm <= end : hhmm >= start || hhmm <= end;
-  return selectedDays().includes(day) && timeOk && $('alertEnabled').checked;
+  return alert?.enabled !== false && days.includes(day) && timeOk;
+}
+
+function withinLocalSchedule() {
+  return withinAlertSchedule({
+    enabled: $('alertEnabled').checked,
+    startTime: $('startTime').value || '00:00',
+    endTime: $('endTime').value || '23:59',
+    days: selectedDays()
+  });
 }
 
 function playAlarm() {
@@ -1717,15 +1848,58 @@ function playAlarm() {
   navigator.vibrate?.([300, 120, 300, 120, 500]);
 }
 
-async function showLocalNotification(title, body) {
+async function showLocalNotification(title, body, alertConfig = null) {
   if ('Notification' in window && Notification.permission === 'granted' && state.swRegistration) {
+    const routeId = alertConfig?.routeId || state.route?.routeId || 'bus';
+    const alertMode = alertConfig?.alertMode || $('alertMode').value;
     await state.swRegistration.showNotification(title, {
       body, icon: '/icons/icon-192.png', badge: '/icons/icon-192.png',
-      tag: `foreground-${state.route?.routeId || 'bus'}`, requireInteraction: true,
-      silent: $('alertMode').value === 'pushOnly',
-      vibrate: $('alertMode').value === 'pushOnly' ? [] : [300, 120, 300, 120, 500], data: { url: '/' }
+      tag: `foreground-${routeId}`, requireInteraction: true,
+      silent: alertMode === 'pushOnly',
+      vibrate: alertMode === 'pushOnly' ? [] : [300, 120, 300, 120, 500], data: { url: '/' }
     });
   }
+}
+
+
+async function checkSavedAlertRoutes() {
+  const alerts = state.savedAlerts.filter(withinAlertSchedule).slice(0, 12);
+  if (!alerts.length) return;
+  for (const alert of alerts) {
+    const routeKey = alertStorageKey(alert);
+    // 현재 화면에서 보고 있는 노선은 더 정확한 실시간 위치 결합 로직이 따로 처리한다.
+    if (state.route && state.origin && routeKey === `${state.route.routeId}_${state.origin.stationId}`) continue;
+    try {
+      const result = await api('arrival', {
+        stationId: alert.stationId,
+        routeId: alert.routeId,
+        staOrder: alert.staOrder
+      }, { fresh: true, timeout: 15000 });
+      const item = result.item || {};
+      const locationNo = number(item.locationNo1, 0);
+      const lead = number(alert.leadStops, 3);
+      const vehicleKey = String(item.plateNo1 || item.vehId1 || 'unknown');
+      const alarmKey = `${new Date().toDateString()}:${routeKey}:${vehicleKey}`;
+      if (locationNo > 0 && locationNo <= lead && state.savedAlertAlarmKeys.get(routeKey) !== alarmKey) {
+        state.savedAlertAlarmKeys.set(routeKey, alarmKey);
+        state.lastAlertAt = Date.now();
+        const title = `${alert.routeName || '버스'}번 ${locationNo}정거장 전`;
+        const body = `${alert.stationName || '탑승 정류장'}에 곧 도착합니다.`;
+        if (alert.alertMode !== 'pushOnly') playAlarm();
+        await showLocalNotification(title, body, alert);
+        toast(`${title} · ${body}`, 5000);
+      }
+      if (locationNo <= 0 || locationNo > lead + 2) state.savedAlertAlarmKeys.delete(routeKey);
+    } catch (error) {
+      console.warn('saved alert foreground check failed', routeKey, error);
+    }
+  }
+}
+
+function startSavedAlertPolling() {
+  clearInterval(state.savedAlertPoller);
+  state.savedAlertPoller = setInterval(() => checkSavedAlertRoutes(), 60000);
+  setTimeout(() => checkSavedAlertRoutes(), 6000);
 }
 
 function checkForegroundAlarm() {
@@ -1774,7 +1948,7 @@ async function initFirebase() {
   try {
     const configResponse = await fetch('/api/config', { cache: 'no-store' });
     state.firebaseConfig = await configResponse.json();
-    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.9.0', { scope: '/' });
+    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.0.0', { scope: '/' });
 
     if (!state.firebaseConfig.backgroundPushConfigured) {
       els.pushState.textContent = '화면 켤 때만';
@@ -1833,7 +2007,7 @@ async function saveAlert() {
 
     if (!state.firebase?.firestore || !state.firebase?.messaging || !state.firebase?.user) {
       const localPayload = buildAlertPayload('');
-      localStorage.setItem('hogyeBusAlert', JSON.stringify(localPayload));
+      upsertSavedAlert(localPayload);
       els.pushState.textContent = state.firebaseAuthError ? '설정 1단계 필요' : '화면 켤 때만';
       els.alertInfo.textContent = state.firebaseAuthError
         ? '로컬 알림은 저장했습니다. 화면이 꺼져도 받으려면 Firebase Authentication에서 익명 로그인을 사용 설정한 뒤 다시 저장해 주세요.'
@@ -1857,11 +2031,11 @@ async function saveAlert() {
       updatedAt: serverTimestamp(),
       createdAt: serverTimestamp()
     }, { merge: true });
-    localStorage.setItem('hogyeBusAlert', JSON.stringify(payload));
+    upsertSavedAlert({ ...payload, _docId: id });
     els.pushState.textContent = '자동 감시 중';
     els.pushState.classList.add('good');
-    els.alertInfo.textContent = `${payload.routeName}번을 ${payload.startTime}~${payload.endTime}, ${payload.leadStops}정거장 전부터 감시합니다.`;
-    toast('백그라운드 버스 알림을 저장했습니다.');
+    els.alertInfo.textContent = `${payload.routeName}번 알림 저장 완료 · ${payload.startTime}~${payload.endTime} · ${payload.leadStops}정거장 전`;
+    toast(`${payload.routeName}번 알림을 별도로 저장했습니다.`);
   } catch (error) {
     toast(error.message, 4000);
   }
@@ -1947,6 +2121,9 @@ function setupEvents() {
 }
 
 async function boot() {
+  state.savedAlerts = readSavedAlerts();
+  renderSavedAlerts();
+  startSavedAlertPolling();
   setupEvents();
   initFirebase();
   try {

@@ -517,3 +517,79 @@ input:focus, select:focus { border-color: #82b8fa; box-shadow: 0 0 0 4px rgba(25
 .primary:disabled { cursor: wait; opacity: .72; }
 .route-result-summary { padding: 10px 12px; color: #315a89; font-size: 10px; font-weight: 800; line-height: 1.45; text-align: center; border: 1px solid #d7e7fa; border-radius: 12px; background: linear-gradient(145deg, #eef7ff, #f9fcff); }
 
+
+/* v2.0 — 위치기반 정류소 안정화 · 버스번호별 알림 · 시간 입력 축소 */
+.alert-route-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  margin: -4px 0 12px;
+  padding: 8px 11px;
+  color: #53647b;
+  font-size: 10px;
+  line-height: 1.35;
+  border: 1px solid #dce8f6;
+  border-radius: 13px;
+  background: #f7fbff;
+}
+.alert-route-chip b {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  color: #fff;
+  font-size: 11px;
+  border-radius: 9px;
+  background: linear-gradient(145deg, #075bd9, #1598ff);
+}
+.alert-route-chip span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.time-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-width: 430px; }
+.time-field { min-width: 0; }
+.time-field > span { margin-bottom: 5px !important; font-size: 10px !important; }
+.time-field input[type="time"] {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  height: 40px;
+  padding: 0 9px;
+  font-size: 14px;
+  font-weight: 850;
+  text-align: center;
+  border-radius: 12px;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.time-field input[type="time"]::-webkit-date-and-time-value { text-align: center; min-width: 0; }
+.time-field input[type="time"]::-webkit-calendar-picker-indicator { margin: 0; padding: 2px; opacity: .65; }
+.saved-alert-panel { margin-top: 14px; padding-top: 14px; border-top: 1px solid #e5edf6; }
+.saved-alert-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 9px; }
+.saved-alert-heading strong, .saved-alert-heading span { display: block; }
+.saved-alert-heading strong { font-size: 12px; }
+.saved-alert-heading span { margin-top: 3px; color: var(--muted); font-size: 9px; }
+.saved-alert-heading b { min-width: 35px; padding: 5px 8px; color: #0a61ce; font-size: 10px; text-align: center; border-radius: 999px; background: #eaf4ff; }
+.saved-alerts { display: grid; gap: 7px; }
+.saved-alert-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 58px;
+  padding: 9px 10px;
+  border: 1px solid #dce7f3;
+  border-radius: 14px;
+  background: linear-gradient(145deg, #fff, #f8fbff);
+}
+.saved-route-number { min-width: 45px; padding: 7px 8px; color: #fff; font-size: 12px; font-weight: 950; text-align: center; border-radius: 10px; background: linear-gradient(145deg, #0759da, #1598ff); }
+.saved-alert-copy { min-width: 0; }
+.saved-alert-copy strong, .saved-alert-copy span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.saved-alert-copy strong { font-size: 11px; }
+.saved-alert-copy span { margin-top: 3px; color: #6d7d92; font-size: 9px; }
+.saved-alert-delete { min-height: 30px; padding: 0 9px; color: #c33b53; font-size: 9px; font-weight: 900; border: 1px solid #f0cbd2; border-radius: 9px; background: #fff6f8; }
+.compact-empty { padding: 10px; font-size: 10px; }
+
+@media (max-width: 560px) {
+  .time-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; gap: 7px; }
+  .time-field input[type="time"] { min-height: 38px; height: 38px; padding: 0 5px; font-size: 12px; }
+  .saved-alert-row { grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; }
+  .saved-route-number { min-width: 40px; font-size: 11px; }
+}

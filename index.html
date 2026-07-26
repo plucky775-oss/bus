@@ -14,7 +14,7 @@
   <link rel="icon" type="image/png" href="/icons/favicon.png" />
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="/styles.css?v=1.8.0" />
+  <link rel="stylesheet" href="/styles.css?v=2.0.0" />
 </head>
 <body>
   <div class="app-shell">
@@ -183,9 +183,11 @@
           <div><strong>원하는 시간에만 자동 감시</strong><span>앱을 닫아도 설정한 조건에 맞으면 알려드립니다.</span></div>
         </div>
 
-        <div class="form-grid two">
-          <label><span>시작 시간</span><input type="time" id="startTime" value="15:00" /></label>
-          <label><span>종료 시간</span><input type="time" id="endTime" value="23:00" /></label>
+        <div class="alert-route-chip" id="alertRouteChip">버스를 선택하면 해당 번호의 알림을 따로 저장할 수 있습니다.</div>
+
+        <div class="form-grid two time-grid">
+          <label class="time-field"><span>시작</span><input type="time" id="startTime" value="15:00" /></label>
+          <label class="time-field"><span>종료</span><input type="time" id="endTime" value="23:00" /></label>
         </div>
 
         <div class="field-block">
@@ -226,13 +228,21 @@
         </label>
 
         <div class="alert-actions">
-          <button class="primary" id="saveAlert">알림 허용하고 저장</button>
+          <button class="primary" id="saveAlert">선택 버스 알림 저장</button>
           <button class="secondary" id="testAlert">
             <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Zm4 4a4 4 0 0 1 0 6m2-8a7 7 0 0 1 0 10"/></svg>
             소리 테스트
           </button>
         </div>
         <div class="info-box" id="alertInfo">앱을 홈 화면에 설치하고 알림을 허용하면 화면이 꺼진 상태에서도 푸시 알림을 받을 수 있습니다.</div>
+
+        <div class="saved-alert-panel">
+          <div class="saved-alert-heading">
+            <div><strong>버스번호별 저장 알림</strong><span>버스마다 시간과 요일을 따로 저장합니다.</span></div>
+            <b id="savedAlertCount">0개</b>
+          </div>
+          <div class="saved-alerts" id="savedAlerts"><div class="empty compact-empty">저장된 버스 알림이 없습니다.</div></div>
+        </div>
       </section>
 
       <section class="card help-card">
@@ -269,6 +279,6 @@
   <audio id="alarmAudio" preload="auto"></audio>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script type="module" src="/app.js?v=1.8.0"></script>
+  <script type="module" src="/app.js?v=2.0.0"></script>
 </body>
 </html>
