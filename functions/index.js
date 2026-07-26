@@ -8,9 +8,29 @@ initializeApp();
 const db = getFirestore();
 const GBIS_SERVICE_KEY = defineSecret('GBIS_SERVICE_KEY');
 
-function decodeKey(value) {
-  try { return decodeURIComponent(value); } catch { return value; }
+function normalizeServiceKey(rawValue) {
+  let value = String(rawValue || '').trim();
+  if ((value.startsWith('\"') && value.endsWith('\"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1).trim();
+  }
+  value = value.replace(/\s+/g, '');
+  for (let i = 0; i < 2; i += 1) {
+    try {
+      const decoded = decodeURIComponent(value);
+      if (decoded === value) break;
+      value = decoded;
+    } catch {
+      break;
+    }
+  }
+  return value;
 }
+
+function readXmlTag(xml, tagName) {
+  const match = String(xml).match(new RegExp(`<${tagName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tagName}>`, 'i'));
+  return match ? match[1].replace(/<[^>]+>/g, '').trim() : '';
+}
+
 
 function koreaParts(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -29,17 +49,36 @@ function withinTime(now, start, end) {
 
 async function fetchArrival(serviceKey, alert) {
   const url = new URL('https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalItemv2');
-  url.searchParams.set('serviceKey', decodeKey(serviceKey));
   url.searchParams.set('format', 'json');
+  url.searchParams.set('serviceKey', normalizeServiceKey(serviceKey));
   url.searchParams.set('stationId', String(alert.stationId));
   url.searchParams.set('routeId', String(alert.routeId));
   url.searchParams.set('staOrder', String(alert.staOrder));
-  const response = await fetch(url, { headers: { Accept: 'application/json' } });
-  const json = await response.json();
+
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json, application/xml;q=0.9', 'User-Agent': 'hogye-bus-alert-functions/1.1' },
+    signal: AbortSignal.timeout(12000)
+  });
+  const text = await response.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch { /* XML/HTML 오류는 아래에서 처리 */ }
+
+  if (!json) {
+    const apiMessage = readXmlTag(text, 'returnAuthMsg') || readXmlTag(text, 'errMsg') || readXmlTag(text, 'resultMessage');
+    const upper = `${apiMessage} ${text}`.toUpperCase();
+    if (response.status === 403 || upper.includes('SERVICE ACCESS DENIED')) {
+      throw new Error('공공데이터포털에서 “경기도_버스도착정보 조회” 활용신청이 필요합니다.');
+    }
+    throw new Error(apiMessage || `도착정보 API가 올바르지 않은 응답을 반환했습니다. (${response.status})`);
+  }
+
   const root = json.response || json;
+  const commonHeader = root.comMsgHeader || json.comMsgHeader || {};
   const header = root.msgHeader || {};
-  const code = String(header.resultCode ?? '0');
-  if (!response.ok || !['0', '00', '0000'].includes(code)) throw new Error(header.resultMessage || '도착정보 조회 실패');
+  const code = String(header.resultCode ?? commonHeader.returnReasonCode ?? (response.ok ? '0' : response.status));
+  const message = header.resultMessage || commonHeader.returnAuthMsg || commonHeader.errMsg || '도착정보 조회 실패';
+  if (response.ok && ['4', '04', '0004'].includes(code)) return null;
+  if (!response.ok || !['0', '00', '0000'].includes(code)) throw new Error(message);
   return root.msgBody?.busArrivalItem || null;
 }
 
