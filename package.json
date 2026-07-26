@@ -1,8 +1,8 @@
 {
   "name": "hogye-bus-alert",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
-  "description": "위치기반 주변정류소, 버스번호별 다중 알림, 실시간 노선 위치를 지원하는 버스 알림 PWA",
+  "description": "버스번호별 다중 알림음, 도착지 즐겨찾기, 위치기반 주변정류소, 실시간 노선 위치를 지원하는 버스 알림 PWA",
   "scripts": {
     "dev": "vercel dev",
     "check": "node --check app.js && node --check api/gbis.js && node --check api/config.js && node --check api/firebase-messaging-sw.js && node --check functions/index.js"

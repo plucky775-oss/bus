@@ -593,3 +593,70 @@ input:focus, select:focus { border-color: #82b8fa; box-shadow: 0 0 0 4px rgba(25
   .saved-alert-row { grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; }
   .saved-route-number { min-width: 40px; font-size: 11px; }
 }
+
+
+/* v2.1 — 저장 우선 처리 · 다중 알림음 · 도착지 즐겨찾기 */
+.destination-favorite-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+}
+.destination-favorite-bar > span { min-width: 0; color: #7a8799; font-size: 9px; line-height: 1.4; text-align: right; }
+.favorite-toggle-button {
+  min-height: 34px;
+  flex: 0 0 auto;
+  padding: 0 11px;
+  color: #6c5b20;
+  font-size: 10px;
+  font-weight: 900;
+  border: 1px solid #eadba6;
+  border-radius: 11px;
+  background: linear-gradient(145deg, #fffdf5, #fff8d9);
+}
+.favorite-toggle-button span { margin-right: 3px; font-size: 14px; }
+.favorite-toggle-button.saved { color: #8b5900; border-color: #f2c85b; background: linear-gradient(145deg, #fff7d7, #ffe99f); }
+.favorite-toggle-button:disabled { cursor: not-allowed; opacity: .48; }
+.favorite-destination-panel { margin-top: 10px; padding: 10px; border: 1px solid #e5ebf3; border-radius: 14px; background: rgba(249, 251, 254, .9); }
+.favorite-destination-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+.favorite-destination-heading strong { color: #44546a; font-size: 10px; }
+.favorite-destination-heading b { min-width: 32px; padding: 4px 7px; color: #986500; font-size: 9px; text-align: center; border-radius: 999px; background: #fff1ba; }
+.favorite-destinations { display: grid; gap: 6px; }
+.favorite-destination-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.favorite-destination-use {
+  min-width: 0;
+  min-height: 43px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  text-align: left;
+  border: 1px solid #e4eaf2;
+  border-radius: 11px;
+  background: #fff;
+}
+.favorite-destination-use > span:last-child { min-width: 0; }
+.favorite-destination-use strong, .favorite-destination-use small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.favorite-destination-use strong { color: #26364b; font-size: 10px; }
+.favorite-destination-use small { margin-top: 2px; color: #8190a4; font-size: 8px; }
+.favorite-star { color: #f0b400; font-size: 15px; }
+.favorite-destination-delete { width: 34px; height: 34px; padding: 0; color: #ad5263; font-size: 18px; border: 1px solid #efd7dc; border-radius: 10px; background: #fff7f9; }
+.favorite-empty { padding: 7px !important; font-size: 9px !important; }
+.alert-option-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.alert-option-grid label { min-width: 0; }
+.alert-option-grid select { width: 100%; min-width: 0; font-size: 11px; }
+.saved-alert-copy small { display: block; margin-top: 2px; overflow: hidden; color: #8a97a8; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+#saveAlert:disabled { cursor: wait; opacity: .78; }
+
+@media (max-width: 680px) {
+  .alert-option-grid { grid-template-columns: 1fr 1fr; }
+  .alert-option-grid label:last-child { grid-column: 1 / -1; }
+}
+@media (max-width: 430px) {
+  .destination-favorite-bar { align-items: flex-start; flex-direction: column; }
+  .destination-favorite-bar > span { text-align: left; }
+  .alert-option-grid { grid-template-columns: 1fr; }
+  .alert-option-grid label:last-child { grid-column: auto; }
+}

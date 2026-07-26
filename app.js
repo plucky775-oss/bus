@@ -38,7 +38,9 @@ const state = {
   nearbyAbortController: null,
   savedAlerts: [],
   savedAlertPoller: null,
-  savedAlertAlarmKeys: new Map()
+  savedAlertAlarmKeys: new Map(),
+  destinationFavorites: [],
+  alertSaveBusy: false
 };
 
 const els = {
@@ -51,13 +53,16 @@ const els = {
   toast: $('toast'), alarmAudio: $('alarmAudio'), alertInfo: $('alertInfo'),
   refreshLive: $('refreshLive'), refreshLiveLabel: $('refreshLiveLabel'),
   nearbyStatus: $('nearbyStatus'), liveVehicles: $('liveVehicles'), liveUpdated: $('liveUpdated'),
-  savedAlerts: $('savedAlerts'), savedAlertCount: $('savedAlertCount'), alertRouteChip: $('alertRouteChip')
+  savedAlerts: $('savedAlerts'), savedAlertCount: $('savedAlertCount'), alertRouteChip: $('alertRouteChip'),
+  destinationFavorites: $('destinationFavorites'), destinationFavoriteCount: $('destinationFavoriteCount'),
+  toggleDestinationFavorite: $('toggleDestinationFavorite'), favoriteDestinationHint: $('favoriteDestinationHint')
 };
 
 const DESTINATION_WALK_RADIUS_METERS = 800;
 const NEARBY_RESULT_RADIUS_METERS = 1800;
 const STORED_LOCATION_MAX_AGE_MS = 15 * 60 * 1000;
 const SAVED_ALERTS_KEY = 'hogyeBusAlertsV2';
+const DESTINATION_FAVORITES_KEY = 'hogyeBusDestinationFavoritesV1';
 
 function toast(message, ms = 2600) {
   els.toast.textContent = message;
@@ -334,6 +339,128 @@ function stationMeta(station, nearby = false) {
   if (station.mobileNo) parts.push(`정류소 ${esc(station.mobileNo)}`);
   if (nearby && Number.isFinite(number(station.distance, NaN))) parts.push(`현재 위치에서 ${Math.round(number(station.distance))}m`);
   return parts.join(' · ');
+}
+
+
+function destinationFavoriteKey(station) {
+  if (!station) return '';
+  const coordinate = stationCoordinate(station);
+  const coordinateKey = coordinate ? `${coordinate.lat.toFixed(5)}:${coordinate.lng.toFixed(5)}` : '';
+  return String(station.stationId || `${normalizeName(station.stationName)}:${station.mobileNo || ''}:${coordinateKey}`);
+}
+
+function compactFavoriteStation(station) {
+  if (!station) return null;
+  return {
+    stationId: String(station.stationId || ''),
+    stationName: String(station.stationName || ''),
+    regionName: String(station.regionName || ''),
+    mobileNo: String(station.mobileNo || ''),
+    ...coordinateFields(station)
+  };
+}
+
+function readDestinationFavorites() {
+  try {
+    const items = JSON.parse(localStorage.getItem(DESTINATION_FAVORITES_KEY) || '[]');
+    if (!Array.isArray(items)) return [];
+    const unique = new Map();
+    items.forEach(item => {
+      const station = compactFavoriteStation(item?.station || item);
+      const key = destinationFavoriteKey(station);
+      if (key && station?.stationName) unique.set(key, { key, station, savedAt: number(item?.savedAt, 0) });
+    });
+    return [...unique.values()].sort((a, b) => number(b.savedAt, 0) - number(a.savedAt, 0));
+  } catch {
+    return [];
+  }
+}
+
+function writeDestinationFavorites(items) {
+  state.destinationFavorites = [...items];
+  localStorage.setItem(DESTINATION_FAVORITES_KEY, JSON.stringify(state.destinationFavorites));
+  renderDestinationFavorites();
+  updateDestinationFavoriteControl();
+}
+
+function updateDestinationFavoriteControl() {
+  if (!els.toggleDestinationFavorite) return;
+  const key = destinationFavoriteKey(state.destination);
+  const saved = Boolean(key && state.destinationFavorites.some(item => item.key === key));
+  els.toggleDestinationFavorite.disabled = !state.destination;
+  els.toggleDestinationFavorite.classList.toggle('saved', saved);
+  els.toggleDestinationFavorite.innerHTML = saved
+    ? '<span aria-hidden="true">★</span> 즐겨찾기 해제'
+    : '<span aria-hidden="true">☆</span> 즐겨찾기 저장';
+  if (els.favoriteDestinationHint) {
+    els.favoriteDestinationHint.textContent = !state.destination
+      ? '도착 정류장을 선택하면 저장할 수 있습니다.'
+      : saved ? '이 도착지는 즐겨찾기에 저장되어 있습니다.' : '자주 가는 도착지를 한 번에 불러올 수 있습니다.';
+  }
+}
+
+function renderDestinationFavorites() {
+  if (!els.destinationFavorites || !els.destinationFavoriteCount) return;
+  els.destinationFavoriteCount.textContent = `${state.destinationFavorites.length}개`;
+  if (!state.destinationFavorites.length) {
+    els.destinationFavorites.innerHTML = '<div class="empty favorite-empty">저장된 도착지가 없습니다.</div>';
+    return;
+  }
+  els.destinationFavorites.innerHTML = state.destinationFavorites.map(item => {
+    const station = item.station;
+    const meta = [station.regionName, station.mobileNo ? `정류소 ${station.mobileNo}` : ''].filter(Boolean).join(' · ');
+    return `<div class="favorite-destination-row" data-favorite-key="${esc(item.key)}">
+      <button type="button" class="favorite-destination-use" data-use-favorite="${esc(item.key)}">
+        <span class="favorite-star" aria-hidden="true">★</span>
+        <span><strong>${esc(station.stationName)}</strong><small>${esc(meta || '저장된 도착 정류장')}</small></span>
+      </button>
+      <button type="button" class="favorite-destination-delete" data-delete-favorite="${esc(item.key)}" aria-label="${esc(station.stationName)} 즐겨찾기 삭제">×</button>
+    </div>`;
+  }).join('');
+  els.destinationFavorites.querySelectorAll('[data-use-favorite]').forEach(button => {
+    button.addEventListener('click', () => useDestinationFavorite(button.dataset.useFavorite));
+  });
+  els.destinationFavorites.querySelectorAll('[data-delete-favorite]').forEach(button => {
+    button.addEventListener('click', () => removeDestinationFavorite(button.dataset.deleteFavorite));
+  });
+}
+
+function toggleDestinationFavorite() {
+  if (!state.destination) return toast('먼저 도착 정류장을 선택해 주세요.');
+  const key = destinationFavoriteKey(state.destination);
+  const existing = state.destinationFavorites.some(item => item.key === key);
+  try {
+    if (existing) {
+      writeDestinationFavorites(state.destinationFavorites.filter(item => item.key !== key));
+      toast(`${state.destination.stationName} 즐겨찾기를 해제했습니다.`);
+    } else {
+      const next = state.destinationFavorites.filter(item => item.key !== key);
+      next.unshift({ key, station: compactFavoriteStation(state.destination), savedAt: Date.now() });
+      writeDestinationFavorites(next.slice(0, 12));
+      toast(`${state.destination.stationName}을 도착지 즐겨찾기에 저장했습니다.`);
+    }
+  } catch (error) {
+    toast(`즐겨찾기 저장 실패: ${error.message}`, 4000);
+  }
+}
+
+function useDestinationFavorite(key) {
+  const item = state.destinationFavorites.find(favorite => favorite.key === key);
+  if (!item) return;
+  document.querySelectorAll('.preset').forEach(button => button.classList.remove('active'));
+  selectStation('destination', { ...item.station });
+  toast(`${item.station.stationName}을 도착지로 불러왔습니다.`);
+}
+
+function removeDestinationFavorite(key) {
+  const item = state.destinationFavorites.find(favorite => favorite.key === key);
+  if (!item) return;
+  try {
+    writeDestinationFavorites(state.destinationFavorites.filter(favorite => favorite.key !== key));
+    toast(`${item.station.stationName} 즐겨찾기를 삭제했습니다.`);
+  } catch (error) {
+    toast(`즐겨찾기 삭제 실패: ${error.message}`, 4000);
+  }
 }
 
 function renderStationSuggestions(kind, stations, { nearby = false } = {}) {
@@ -622,6 +749,7 @@ function selectStation(kind, station) {
   selected.textContent = stationLabel(station);
   selected.classList.add('ready');
   suggestions.innerHTML = '';
+  if (kind === 'destination') updateDestinationFavoriteControl();
   toast(`${kind === 'origin' ? '탑승' : '도착'} 정류장을 선택했습니다.`);
 }
 
@@ -1757,6 +1885,7 @@ function renderSavedAlerts() {
       <div class="saved-alert-copy">
         <strong>${esc(alert.stationName || '탑승 정류장')}</strong>
         <span>${esc(alert.startTime || '00:00')}–${esc(alert.endTime || '23:59')} · ${esc(alertDaysText(alert.days))} · ${number(alert.leadStops, 3)}정거장 전</span>
+        <small>${esc(alertModeLabel(alert.alertMode))} · ${esc(alertSoundLabel(alert.alertSound))}</small>
       </div>
       <button type="button" class="saved-alert-delete" data-delete-alert="${esc(alertStorageKey(alert))}" aria-label="${esc(alert.routeName || '')}번 알림 삭제">삭제</button>
     </article>`).join('');
@@ -1771,6 +1900,7 @@ function applyAlertToForm(alert) {
   $('endTime').value = alert.endTime || '23:00';
   $('leadStops').value = String(number(alert.leadStops, 3));
   $('alertMode').value = alert.alertMode || 'push';
+  $('alertSound').value = alert.alertSound || 'standard';
   $('alertEnabled').checked = alert.enabled !== false;
   const activeDays = new Set((alert.days || []).map(Number));
   document.querySelectorAll('.day').forEach(button => button.classList.toggle('active', activeDays.has(Number(button.dataset.day))));
@@ -1830,22 +1960,73 @@ function withinLocalSchedule() {
   });
 }
 
-function playAlarm() {
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const sequence = [0, .45, .9];
-  sequence.forEach((offset, index) => {
+function alertModeLabel(mode = 'push') {
+  return ({
+    push: '소리·진동·푸시',
+    soundPush: '소리·푸시',
+    vibratePush: '진동·푸시',
+    pushOnly: '푸시만'
+  })[mode] || '소리·진동·푸시';
+}
+
+function alertSoundLabel(sound = 'standard') {
+  return ({
+    standard: '기본 알림음',
+    bright: '경쾌한 알림음',
+    urgent: '긴급 알림음',
+    soft: '부드러운 알림음',
+    chime: '차임 알림음',
+    silent: '무음'
+  })[sound] || '기본 알림음';
+}
+
+function alertModeUsesSound(mode = 'push') {
+  return mode === 'push' || mode === 'soundPush';
+}
+
+function alertModeUsesVibration(mode = 'push') {
+  return mode === 'push' || mode === 'vibratePush';
+}
+
+function soundPattern(sound = 'standard') {
+  const patterns = {
+    standard: { type: 'sine', gain: .34, notes: [[0, 740, .34], [.42, 880, .34], [.84, 740, .42]] },
+    bright: { type: 'triangle', gain: .28, notes: [[0, 880, .24], [.28, 1100, .24], [.56, 1320, .36]] },
+    urgent: { type: 'square', gain: .22, notes: [[0, 690, .22], [.27, 980, .22], [.54, 690, .22], [.81, 980, .42]] },
+    soft: { type: 'sine', gain: .18, notes: [[0, 523, .42], [.48, 659, .55]] },
+    chime: { type: 'sine', gain: .25, notes: [[0, 784, .32], [.16, 1047, .42], [.34, 1319, .62]] },
+    silent: { type: 'sine', gain: 0, notes: [] }
+  };
+  return patterns[sound] || patterns.standard;
+}
+
+function playAlarm(sound = 'standard', { vibrate = true } = {}) {
+  if (vibrate) navigator.vibrate?.([280, 110, 280, 110, 480]);
+  const pattern = soundPattern(sound);
+  if (!pattern.notes.length) return;
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return;
+  const ctx = new AudioContextClass();
+  pattern.notes.forEach(([offset, frequency, duration]) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
-    osc.type = 'sine';
-    osc.frequency.value = index === 1 ? 880 : 740;
+    osc.type = pattern.type;
+    osc.frequency.value = frequency;
     gain.gain.setValueAtTime(.0001, ctx.currentTime + offset);
-    gain.gain.exponentialRampToValueAtTime(.35, ctx.currentTime + offset + .03);
-    gain.gain.exponentialRampToValueAtTime(.0001, ctx.currentTime + offset + .35);
+    gain.gain.exponentialRampToValueAtTime(Math.max(.001, pattern.gain), ctx.currentTime + offset + .025);
+    gain.gain.exponentialRampToValueAtTime(.0001, ctx.currentTime + offset + duration);
     osc.connect(gain).connect(ctx.destination);
     osc.start(ctx.currentTime + offset);
-    osc.stop(ctx.currentTime + offset + .38);
+    osc.stop(ctx.currentTime + offset + duration + .03);
   });
-  navigator.vibrate?.([300, 120, 300, 120, 500]);
+  setTimeout(() => Promise.resolve(ctx.close?.()).catch(() => undefined), 2500);
+}
+
+function playConfiguredAlert(alertConfig = null) {
+  const mode = alertConfig?.alertMode || $('alertMode').value || 'push';
+  const sound = alertConfig?.alertSound || $('alertSound').value || 'standard';
+  if (alertModeUsesSound(mode)) playAlarm(sound, { vibrate: alertModeUsesVibration(mode) });
+  else if (alertModeUsesVibration(mode)) navigator.vibrate?.([280, 110, 280, 110, 480]);
 }
 
 async function showLocalNotification(title, body, alertConfig = null) {
@@ -1856,7 +2037,8 @@ async function showLocalNotification(title, body, alertConfig = null) {
       body, icon: '/icons/icon-192.png', badge: '/icons/icon-192.png',
       tag: `foreground-${routeId}`, requireInteraction: true,
       silent: alertMode === 'pushOnly',
-      vibrate: alertMode === 'pushOnly' ? [] : [300, 120, 300, 120, 500], data: { url: '/' }
+      vibrate: alertModeUsesVibration(alertMode) ? [300, 120, 300, 120, 500] : [],
+      data: { url: '/', alertMode, alertSound: alertConfig?.alertSound || $('alertSound').value || 'standard' }
     });
   }
 }
@@ -1885,7 +2067,7 @@ async function checkSavedAlertRoutes() {
         state.lastAlertAt = Date.now();
         const title = `${alert.routeName || '버스'}번 ${locationNo}정거장 전`;
         const body = `${alert.stationName || '탑승 정류장'}에 곧 도착합니다.`;
-        if (alert.alertMode !== 'pushOnly') playAlarm();
+        playConfiguredAlert(alert);
         await showLocalNotification(title, body, alert);
         toast(`${title} · ${body}`, 5000);
       }
@@ -1930,7 +2112,7 @@ function checkForegroundAlarm() {
     state.lastAlertAt = Date.now();
     const title = `${state.route.routeName}번 ${approximate ? '약 ' : ''}${locationNo}정거장 전`;
     const body = `${state.origin.stationName}에 곧 도착합니다.`;
-    if ($('alertMode').value === 'push') playAlarm();
+    playConfiguredAlert();
     showLocalNotification(title, body);
     toast(body, 5000);
   }
@@ -1948,7 +2130,7 @@ async function initFirebase() {
   try {
     const configResponse = await fetch('/api/config', { cache: 'no-store' });
     state.firebaseConfig = await configResponse.json();
-    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.0.0', { scope: '/' });
+    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.1.0', { scope: '/' });
 
     if (!state.firebaseConfig.backgroundPushConfigured) {
       els.pushState.textContent = '화면 켤 때만';
@@ -1967,7 +2149,7 @@ async function initFirebase() {
         const title = payload.notification?.title || payload.data?.title || '우리 버스 알림';
         const body = payload.notification?.body || payload.data?.body || '버스가 곧 도착합니다.';
         const duplicateOfLocalAlarm = Date.now() - state.lastAlertAt < 90000;
-        if (!duplicateOfLocalAlarm && payload.data?.alertMode !== 'pushOnly') playAlarm();
+        if (!duplicateOfLocalAlarm) playConfiguredAlert({ alertMode: payload.data?.alertMode || 'push', alertSound: payload.data?.alertSound || 'standard' });
         state.lastAlertAt = Date.now();
         toast(`${title} · ${body}`, 5000);
       });
@@ -1997,47 +2179,102 @@ async function initFirebase() {
 }
 
 async function saveAlert() {
+  if (state.alertSaveBusy) return;
   if (!state.route || !state.origin) return toast('먼저 버스 노선을 선택해 주세요.');
   if (!selectedDays().length) return toast('알림 요일을 하나 이상 선택해 주세요.');
+
+  const button = $('saveAlert');
+  const originalText = button.textContent;
+  const localPayload = buildAlertPayload('');
+  state.alertSaveBusy = true;
+  button.disabled = true;
+  button.textContent = '기기에 저장 중…';
+
   try {
-    if ('Notification' in window && Notification.permission !== 'granted') {
-      const permission = await Notification.requestPermission();
-      if (permission !== 'granted') throw new Error('알림 권한이 허용되지 않았습니다.');
+    // 푸시 권한이나 Firebase 상태와 무관하게 먼저 기기에 저장한다.
+    upsertSavedAlert(localPayload);
+    button.textContent = '기기 저장 완료';
+    els.pushState.textContent = '기기 저장됨';
+    els.pushState.classList.add('good');
+    els.alertInfo.textContent = `${localPayload.routeName}번 알림이 이 기기에 저장되었습니다. 푸시 연결 상태를 확인하고 있습니다…`;
+    toast(`${localPayload.routeName}번 알림을 기기에 저장했습니다.`);
+
+    let notificationPermission = 'unsupported';
+    if ('Notification' in window) {
+      notificationPermission = Notification.permission;
+      if (notificationPermission === 'default') {
+        try {
+          notificationPermission = await Notification.requestPermission();
+        } catch (permissionError) {
+          console.warn('notification permission request failed', permissionError);
+        }
+      }
     }
 
-    if (!state.firebase?.firestore || !state.firebase?.messaging || !state.firebase?.user) {
-      const localPayload = buildAlertPayload('');
-      upsertSavedAlert(localPayload);
-      els.pushState.textContent = state.firebaseAuthError ? '설정 1단계 필요' : '화면 켤 때만';
-      els.alertInfo.textContent = state.firebaseAuthError
-        ? '로컬 알림은 저장했습니다. 화면이 꺼져도 받으려면 Firebase Authentication에서 익명 로그인을 사용 설정한 뒤 다시 저장해 주세요.'
-        : '로컬 알림을 저장했습니다. 앱을 열어둔 동안 30초마다 버스 도착을 확인합니다.';
-      toast(state.firebaseAuthError ? '로컬 알림 저장 완료 · Firebase 익명 로그인 설정이 필요합니다.' : '로컬 알림 설정을 저장했습니다.', 4500);
+    const remoteReady = Boolean(
+      notificationPermission === 'granted' &&
+      state.firebase?.firestore &&
+      state.firebase?.messaging &&
+      state.firebase?.user &&
+      state.swRegistration
+    );
+
+    if (!remoteReady) {
+      const reason = notificationPermission === 'denied'
+        ? '브라우저 알림 권한이 차단되어 있습니다.'
+        : notificationPermission === 'unsupported'
+          ? '이 브라우저에서는 푸시를 지원하지 않습니다.'
+          : state.firebaseAuthError
+            ? 'Firebase 익명 로그인 연결이 필요합니다.'
+            : '푸시 연결이 아직 준비되지 않았습니다.';
+      els.pushState.textContent = '화면 켤 때 감시';
+      els.pushState.classList.remove('good');
+      els.alertInfo.textContent = `기기 저장 완료 · ${reason} 앱을 열어둔 동안 저장된 노선을 자동 확인합니다.`;
       return;
     }
 
-    const token = await getToken(state.firebase.messaging, {
-      vapidKey: state.firebaseConfig.vapidKey,
-      serviceWorkerRegistration: state.swRegistration
-    });
-    if (!token) throw new Error('푸시 토큰을 발급받지 못했습니다.');
+    try {
+      button.textContent = '푸시 연결 중…';
+      const token = await getToken(state.firebase.messaging, {
+        vapidKey: state.firebaseConfig.vapidKey,
+        serviceWorkerRegistration: state.swRegistration
+      });
+      if (!token) throw new Error('푸시 토큰을 발급받지 못했습니다.');
 
-    const payload = buildAlertPayload(token);
-    const id = `${state.firebase.user.uid}_${state.route.routeId}_${state.origin.stationId}`;
-    await setDoc(doc(state.firebase.firestore, 'busAlerts', id), {
-      ...payload,
-      uid: state.firebase.user.uid,
-      armed: true,
-      updatedAt: serverTimestamp(),
-      createdAt: serverTimestamp()
-    }, { merge: true });
-    upsertSavedAlert({ ...payload, _docId: id });
-    els.pushState.textContent = '자동 감시 중';
-    els.pushState.classList.add('good');
-    els.alertInfo.textContent = `${payload.routeName}번 알림 저장 완료 · ${payload.startTime}~${payload.endTime} · ${payload.leadStops}정거장 전`;
-    toast(`${payload.routeName}번 알림을 별도로 저장했습니다.`);
+      const payload = buildAlertPayload(token);
+      const id = `${state.firebase.user.uid}_${state.route.routeId}_${state.origin.stationId}`;
+      await setDoc(doc(state.firebase.firestore, 'busAlerts', id), {
+        ...payload,
+        uid: state.firebase.user.uid,
+        armed: true,
+        updatedAt: serverTimestamp(),
+        createdAt: serverTimestamp()
+      }, { merge: true });
+      upsertSavedAlert({ ...payload, _docId: id });
+      els.pushState.textContent = '자동 감시 중';
+      els.pushState.classList.add('good');
+      els.alertInfo.textContent = `${payload.routeName}번 저장 완료 · ${payload.startTime}~${payload.endTime} · ${payload.leadStops}정거장 전 · ${alertSoundLabel(payload.alertSound)}`;
+      button.textContent = '푸시까지 저장 완료';
+      toast(`${payload.routeName}번 알림을 기기와 푸시에 저장했습니다.`, 3800);
+    } catch (remoteError) {
+      console.warn('remote alert save failed; local save retained', remoteError);
+      els.pushState.textContent = '기기 저장됨';
+      els.pushState.classList.add('good');
+      els.alertInfo.textContent = `기기 저장은 완료했습니다. 푸시 서버 저장만 실패했습니다: ${remoteError.message}`;
+      button.textContent = '기기 저장 완료';
+      toast(`기기 저장 완료 · 푸시 연결 실패: ${remoteError.message}`, 4800);
+    }
   } catch (error) {
-    toast(error.message, 4000);
+    els.pushState.textContent = '저장 실패';
+    els.pushState.classList.remove('good');
+    els.alertInfo.textContent = `알림 저장 실패: ${error.message}`;
+    toast(`알림 저장 실패: ${error.message}`, 4500);
+  } finally {
+    setTimeout(() => {
+      button.textContent = state.route ? `${state.route.routeName}번 알림 저장` : originalText;
+      button.disabled = false;
+      state.alertSaveBusy = false;
+    }, 900);
   }
 }
 
@@ -2067,6 +2304,7 @@ function buildAlertPayload(fcmToken) {
     endTime: $('endTime').value,
     days: selectedDays(),
     alertMode: $('alertMode').value,
+    alertSound: $('alertSound').value,
     fcmToken,
     timeZone: 'Asia/Seoul'
   };
@@ -2079,7 +2317,8 @@ function setupEvents() {
   $('findRoutes').addEventListener('click', findRoutes);
   $('refreshLive').addEventListener('click', () => loadLive(true, { manual: true }));
   $('saveAlert').addEventListener('click', saveAlert);
-  $('testAlert').addEventListener('click', () => { playAlarm(); toast('알림 소리를 재생했습니다.'); });
+  $('testAlert').addEventListener('click', () => { playConfiguredAlert(); toast(`${alertSoundLabel($('alertSound').value)} 테스트를 재생했습니다.`); });
+  els.toggleDestinationFavorite?.addEventListener('click', toggleDestinationFavorite);
   document.querySelectorAll('[data-map-scope]').forEach(button => button.addEventListener('click', () => {
     state.mapScope = button.dataset.mapScope;
     document.querySelectorAll('[data-map-scope]').forEach(item => item.classList.toggle('active', item === button));
@@ -2095,6 +2334,7 @@ function setupEvents() {
     [els.originInput.value, els.destinationInput.value] = [els.destinationInput.value, els.originInput.value];
     if (state.origin) { els.originSelected.textContent = stationLabel(state.origin); els.originSelected.classList.add('ready'); }
     if (state.destination) { els.destinationSelected.textContent = stationLabel(state.destination); els.destinationSelected.classList.add('ready'); }
+    updateDestinationFavoriteControl();
     els.routeResults.innerHTML = '';
   });
   document.querySelectorAll('.preset').forEach(button => button.addEventListener('click', () => {
@@ -2104,6 +2344,7 @@ function setupEvents() {
     state.destination = null;
     els.destinationSelected.textContent = '목적지 정류장을 선택하세요.';
     els.destinationSelected.classList.remove('ready');
+    updateDestinationFavoriteControl();
     searchStations('destination');
   }));
   document.querySelectorAll('.day').forEach(button => button.addEventListener('click', () => button.classList.toggle('active')));
@@ -2122,7 +2363,10 @@ function setupEvents() {
 
 async function boot() {
   state.savedAlerts = readSavedAlerts();
+  state.destinationFavorites = readDestinationFavorites();
   renderSavedAlerts();
+  renderDestinationFavorites();
+  updateDestinationFavoriteControl();
   startSavedAlertPolling();
   setupEvents();
   initFirebase();

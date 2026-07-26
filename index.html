@@ -14,7 +14,7 @@
   <link rel="icon" type="image/png" href="/icons/favicon.png" />
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="/styles.css?v=2.0.0" />
+  <link rel="stylesheet" href="/styles.css?v=2.1.0" />
 </head>
 <body>
   <div class="app-shell">
@@ -119,6 +119,14 @@
             </div>
             <div class="suggestions" id="destinationSuggestions"></div>
             <div class="selected-stop" id="destinationSelected">목적지 정류장을 선택하세요.</div>
+            <div class="destination-favorite-bar">
+              <button type="button" class="favorite-toggle-button" id="toggleDestinationFavorite" disabled><span aria-hidden="true">☆</span> 즐겨찾기 저장</button>
+              <span id="favoriteDestinationHint">도착 정류장을 선택하면 저장할 수 있습니다.</span>
+            </div>
+            <div class="favorite-destination-panel">
+              <div class="favorite-destination-heading"><strong>도착지 즐겨찾기</strong><b id="destinationFavoriteCount">0개</b></div>
+              <div class="favorite-destinations" id="destinationFavorites"><div class="empty favorite-empty">저장된 도착지가 없습니다.</div></div>
+            </div>
           </div>
         </div>
 
@@ -203,7 +211,7 @@
           </div>
         </div>
 
-        <div class="form-grid two">
+        <div class="form-grid alert-option-grid">
           <label><span>알림 시점</span>
             <select id="leadStops">
               <option value="1">1정거장 전</option>
@@ -216,7 +224,19 @@
           <label><span>알림 방식</span>
             <select id="alertMode">
               <option value="push">소리·진동·푸시</option>
+              <option value="soundPush">소리·푸시</option>
+              <option value="vibratePush">진동·푸시</option>
               <option value="pushOnly">푸시만</option>
+            </select>
+          </label>
+          <label><span>알림 소리</span>
+            <select id="alertSound">
+              <option value="standard">기본 알림음</option>
+              <option value="bright">경쾌한 알림음</option>
+              <option value="urgent">긴급 알림음</option>
+              <option value="soft">부드러운 알림음</option>
+              <option value="chime">차임 알림음</option>
+              <option value="silent">무음</option>
             </select>
           </label>
         </div>
@@ -228,13 +248,13 @@
         </label>
 
         <div class="alert-actions">
-          <button class="primary" id="saveAlert">선택 버스 알림 저장</button>
-          <button class="secondary" id="testAlert">
+          <button type="button" class="primary" id="saveAlert">선택 버스 알림 저장</button>
+          <button type="button" class="secondary" id="testAlert">
             <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Zm4 4a4 4 0 0 1 0 6m2-8a7 7 0 0 1 0 10"/></svg>
-            소리 테스트
+            알림 테스트
           </button>
         </div>
-        <div class="info-box" id="alertInfo">앱을 홈 화면에 설치하고 알림을 허용하면 화면이 꺼진 상태에서도 푸시 알림을 받을 수 있습니다.</div>
+        <div class="info-box" id="alertInfo">저장 버튼을 누르면 먼저 이 기기에 저장합니다. 푸시가 준비되면 Firebase에도 이어서 저장합니다.</div>
 
         <div class="saved-alert-panel">
           <div class="saved-alert-heading">
@@ -253,7 +273,7 @@
           <ol>
             <li>‘내 주변 정류장’ 또는 이름 검색으로 실제 탑승 방향을 선택합니다.</li>
             <li>직행 노선을 고르면 실시간 위치와 도착정보가 표시됩니다.</li>
-            <li>시간과 요일을 정하고 알림을 저장합니다.</li>
+            <li>버스번호별 시간·요일·알림 소리를 정해 저장합니다.</li>
           </ol>
         </div>
       </section>
@@ -279,6 +299,6 @@
   <audio id="alarmAudio" preload="auto"></audio>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script type="module" src="/app.js?v=2.0.0"></script>
+  <script type="module" src="/app.js?v=2.1.0"></script>
 </body>
 </html>
