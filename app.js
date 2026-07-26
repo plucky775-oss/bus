@@ -32,7 +32,9 @@ const state = {
   liveRequestId: 0,
   liveAbortController: null,
   lastLocationSuccessAt: 0,
-  lastLiveUpdatedAt: 0
+  lastLiveUpdatedAt: 0,
+  routeSearchId: 0,
+  routeSearchAbortController: null
 };
 
 const els = {
@@ -539,64 +541,212 @@ function selectStation(kind, station) {
   toast(`${kind === 'origin' ? '탑승' : '도착'} 정류장을 선택했습니다.`);
 }
 
+function stationCoordinate(selected) {
+  const coordinate = normalizeKoreaCoordinate(
+    selected?.x ?? selected?.gpsX ?? selected?.longitude ?? selected?.lng,
+    selected?.y ?? selected?.gpsY ?? selected?.latitude ?? selected?.lat
+  );
+  return coordinate;
+}
+
+function routeStopMatchesSelection(stop, selected, { allowCoordinateFallback = false } = {}) {
+  if (!stop || !selected) return false;
+  if (sameId(stop.stationId, selected.stationId)) return true;
+  if (!allowCoordinateFallback) return false;
+
+  const stopName = normalizeName(stop.stationName);
+  const selectedName = normalizeName(selected.stationName);
+  if (!stopName || stopName !== selectedName) return false;
+
+  const stopPosition = stationPosition(stop);
+  const selectedPosition = stationCoordinate(selected);
+  if (!stopPosition || !selectedPosition) return false;
+  return distanceMeters(stopPosition[0], stopPosition[1], selectedPosition.lat, selectedPosition.lng) <= 25;
+}
+
+function buildDirectRouteCandidate(originRoute, routeStations) {
+  const ordered = (routeStations || [])
+    .map(normalizeRouteStation)
+    .filter(stop => Number.isFinite(routeStationSequence(stop)))
+    .sort((a, b) => routeStationSequence(a) - routeStationSequence(b));
+  if (!ordered.length) return null;
+
+  let originStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.origin));
+  let destinationStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.destination));
+
+  // 드물게 정류소 조회와 노선 경유정류소 조회의 ID가 다르게 내려오는 경우만
+  // 동일 이름 + 25m 이내 좌표로 보조 매칭한다. 반대편 정류장은 포함하지 않는다.
+  if (!originStops.length) {
+    originStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.origin, { allowCoordinateFallback: true }));
+  }
+  if (!destinationStops.length) {
+    destinationStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.destination, { allowCoordinateFallback: true }));
+  }
+  if (!originStops.length || !destinationStops.length) return null;
+
+  const expectedOriginOrders = (originRoute?._originOrders || [originRoute?.staOrder])
+    .map(value => number(value, NaN))
+    .filter(Number.isFinite);
+  const pairs = [];
+  originStops.forEach(originStop => destinationStops.forEach(destinationStop => {
+    const originSeq = routeStationSequence(originStop);
+    const destinationSeq = routeStationSequence(destinationStop);
+    if (!Number.isFinite(originSeq) || !Number.isFinite(destinationSeq) || destinationSeq <= originSeq) return;
+    const stopCount = destinationSeq - originSeq;
+    const orderPenalty = expectedOriginOrders.length
+      ? Math.min(...expectedOriginOrders.map(order => Math.abs(originSeq - order))) * 100
+      : 0;
+    pairs.push({ originStop, destinationStop, originSeq, destinationSeq, stopCount, score: orderPenalty + stopCount });
+  }));
+  if (!pairs.length) return null;
+
+  pairs.sort((a, b) => a.score - b.score);
+  const best = pairs[0];
+  return {
+    originRoute: {
+      ...originRoute,
+      staOrder: best.originSeq,
+      routeId: String(originRoute.routeId || '').trim(),
+      routeName: originRoute.routeName || originRoute.routeNo || '',
+      routeDestName: originRoute.routeDestName || originRoute.routeDestNm || '',
+      routeTypeName: originRoute.routeTypeName || ''
+    },
+    destRoute: {
+      stationId: best.destinationStop.stationId,
+      stationName: best.destinationStop.stationName,
+      staOrder: best.destinationSeq
+    },
+    routeStations: ordered,
+    stopCount: best.stopCount
+  };
+}
+
+async function mapWithConcurrency(items, limit, worker) {
+  if (!items.length) return [];
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  const runners = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
+    while (true) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 async function findRoutes() {
   if (!state.origin || !state.destination) return toast('출발·도착 정류장을 먼저 선택해 주세요.');
-  els.routeResults.innerHTML = '<div class="empty">직행 노선을 확인 중…</div>';
+  if (sameId(state.origin.stationId, state.destination.stationId)) return toast('출발 정류장과 다른 도착 정류장을 선택해 주세요.');
+
+  state.routeSearchAbortController?.abort();
+  const controller = new AbortController();
+  state.routeSearchAbortController = controller;
+  const requestId = ++state.routeSearchId;
+  const findButton = $('findRoutes');
+  const findLabel = $('findRoutesLabel') || findButton?.querySelector('span');
+  if (findButton) findButton.disabled = true;
+  if (findLabel) findLabel.textContent = '운행 노선 확인 중';
+  els.routeResults.innerHTML = '<div class="empty">출발 정류장에 정차하는 모든 버스를 확인 중…</div>';
+
   try {
-    const [originData, destData] = await Promise.all([
-      api('stationRoutes', { stationId: state.origin.stationId }),
-      api('stationRoutes', { stationId: state.destination.stationId })
-    ]);
-    const destinationGroups = destData.items.reduce((map, item) => {
-      const key = String(item.routeId);
-      if (!map.has(key)) map.set(key, []);
-      map.get(key).push(item);
-      return map;
-    }, new Map());
+    // 목적지 정류소의 노선 목록과 단순 교집합을 만들지 않는다.
+    // 출발 정류장에 정차하는 노선을 전부 가져온 뒤 각 노선의 실제 경유 순서를 확인한다.
+    const originData = await api('stationRoutes', { stationId: state.origin.stationId }, {
+      signal: controller.signal,
+      fresh: true,
+      timeout: 20000
+    });
+    if (requestId !== state.routeSearchId) return;
 
-    const seen = new Set();
-    const candidates = originData.items
-      .map(originRoute => {
-        const destinationOptions = destinationGroups.get(String(originRoute.routeId)) || [];
-        const destRoute = destinationOptions
-          .filter(item => number(item.staOrder) > number(originRoute.staOrder))
-          .sort((a, b) => number(a.staOrder) - number(b.staOrder))[0];
-        return { originRoute, destRoute };
-      })
-      .filter(pair => pair.destRoute)
-      .filter(pair => {
-        const key = `${pair.originRoute.routeId}:${pair.originRoute.staOrder}:${pair.destRoute.staOrder}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
-      .sort((a, b) => (number(a.destRoute.staOrder) - number(a.originRoute.staOrder)) - (number(b.destRoute.staOrder) - number(b.originRoute.staOrder)));
+    const routeGroups = new Map();
+    for (const rawRoute of originData.items || []) {
+      const routeId = String(rawRoute?.routeId || '').trim();
+      if (!routeId) continue;
+      const existing = routeGroups.get(routeId);
+      if (existing) {
+        existing._originOrders.push(rawRoute.staOrder);
+        continue;
+      }
+      routeGroups.set(routeId, { ...rawRoute, routeId, _originOrders: [rawRoute.staOrder] });
+    }
+    const uniqueRoutes = [...routeGroups.values()];
 
-    if (!candidates.length) {
-      els.routeResults.innerHTML = '<div class="empty">선택한 방향의 직행 노선이 없습니다. 반대편 정류장이나 다른 목적지 정류장을 선택해 보세요.</div>';
+    if (!uniqueRoutes.length) {
+      els.routeResults.innerHTML = '<div class="empty">선택한 출발 정류장에 정차하는 경기버스가 없습니다.</div>';
       return;
     }
 
-    els.routeResults.innerHTML = candidates.map((pair, index) => {
-      const stops = number(pair.destRoute.staOrder) - number(pair.originRoute.staOrder);
+    let completed = 0;
+    let failed = 0;
+    const candidates = await mapWithConcurrency(uniqueRoutes, 4, async originRoute => {
+      try {
+        const stationData = await api('routeStations', { routeId: originRoute.routeId }, {
+          signal: controller.signal,
+          timeout: 22000
+        });
+        return buildDirectRouteCandidate(originRoute, stationData.items || []);
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        failed += 1;
+        return null;
+      } finally {
+        completed += 1;
+        if (requestId === state.routeSearchId) {
+          els.routeResults.innerHTML = `<div class="empty">출발 정류장 운행 노선 ${uniqueRoutes.length}개 중 ${completed}개 확인 중…</div>`;
+        }
+      }
+    });
+    if (requestId !== state.routeSearchId) return;
+
+    const directRoutes = candidates
+      .filter(Boolean)
+      .sort((a, b) => {
+        const stopDifference = number(a.stopCount, 9999) - number(b.stopCount, 9999);
+        if (stopDifference) return stopDifference;
+        return String(a.originRoute.routeName || '').localeCompare(String(b.originRoute.routeName || ''), 'ko-KR', { numeric: true });
+      });
+
+    if (!directRoutes.length) {
+      const failedNote = failed ? `<br><small>${failed}개 노선은 API 응답 오류로 확인하지 못했습니다. 잠시 후 다시 눌러 주세요.</small>` : '';
+      els.routeResults.innerHTML = `<div class="empty">출발 정류장에 정차하는 ${uniqueRoutes.length}개 노선을 실제 경유 순서로 확인했지만, 선택한 도착 정류장까지 바로 가는 버스가 없습니다.${failedNote}</div>`;
+      return;
+    }
+
+    els.routeResults.innerHTML = `<div class="route-result-summary">출발 정류장 운행 노선 ${uniqueRoutes.length}개를 확인해 직행 ${directRoutes.length}개를 찾았습니다.</div>${directRoutes.map((pair, index) => {
+      const stops = number(pair.stopCount, number(pair.destRoute.staOrder) - number(pair.originRoute.staOrder));
       return `<button class="route-option" data-index="${index}">
         <span class="route-number">${esc(pair.originRoute.routeName)}</span>
-        <span><strong>${esc(pair.originRoute.routeDestName || '진행 방향')}</strong><small>${stops}개 정류장 이동 · ${esc(pair.originRoute.routeTypeName || '')}</small></span>
+        <span><strong>${esc(pair.originRoute.routeDestName || '진행 방향')}</strong><small>${stops}개 정류장 이동 · ${esc(pair.originRoute.routeTypeName || '경기버스')}</small></span>
         <span class="route-arrow">›</span>
       </button>`;
-    }).join('');
+    }).join('')}`;
 
     els.routeResults.querySelectorAll('.route-option').forEach(button => {
-      button.addEventListener('click', () => chooseRoute(candidates[Number(button.dataset.index)]));
+      button.addEventListener('click', () => chooseRoute(directRoutes[Number(button.dataset.index)]));
     });
+    toast(`직행 버스 ${directRoutes.length}개를 찾았습니다.`);
   } catch (error) {
+    if (error?.name === 'AbortError') return;
     els.routeResults.innerHTML = `<div class="empty error">${esc(error.message)}</div>`;
+    updateApiState(error);
+  } finally {
+    if (requestId === state.routeSearchId) {
+      state.routeSearchAbortController = null;
+      if (findButton) findButton.disabled = false;
+      if (findLabel) findLabel.textContent = '직행 버스 찾기';
+    }
   }
 }
 
 async function chooseRoute(pair) {
   state.liveAbortController?.abort();
-  state.routeStations = [];
+  state.routeStations = (pair.routeStations || [])
+    .map(normalizeRouteStation)
+    .filter(stop => Number.isFinite(routeStationSequence(stop)))
+    .sort((a, b) => routeStationSequence(a) - routeStationSequence(b));
   state.routeShape = [];
   state.locations = [];
   state.arrival = null;
@@ -1495,7 +1645,7 @@ async function initFirebase() {
   try {
     const configResponse = await fetch('/api/config', { cache: 'no-store' });
     state.firebaseConfig = await configResponse.json();
-    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.7.0', { scope: '/' });
+    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.8.0', { scope: '/' });
 
     if (!state.firebaseConfig.backgroundPushConfigured) {
       els.pushState.textContent = '화면 켤 때만';
