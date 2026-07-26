@@ -55,6 +55,14 @@ const ENDPOINTS = {
     apiName: '경기도_버스위치정보 조회',
     keyEnv: 'GBIS_LOCATION_SERVICE_KEY'
   },
+  arrivalList: {
+    url: 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalListv2',
+    params: ['stationId'],
+    dataKey: 'busArrivalList',
+    cache: 0,
+    apiName: '경기도_버스도착정보 조회',
+    keyEnv: 'GBIS_ARRIVAL_SERVICE_KEY'
+  },
   arrival: {
     url: 'https://apis.data.go.kr/6410000/busarrivalservice/v2/getBusArrivalItemv2',
     params: ['stationId', 'routeId', 'staOrder'],
@@ -290,7 +298,7 @@ export default async function handler(req, res) {
     const upstream = await fetch(url, {
       headers: {
         Accept: 'application/json, application/xml;q=0.9, text/plain;q=0.5',
-        'User-Agent': 'hogye-bus-alert/1.6'
+        'User-Agent': 'hogye-bus-alert/1.7'
       },
       signal: AbortSignal.timeout(12000)
     });
