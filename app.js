@@ -14,6 +14,8 @@ const state = {
   map: null,
   routeLayer: null,
   markerLayer: null,
+  userLocation: null,
+  mapScope: 'full',
   poller: null,
   firebase: null,
   firebaseConfig: null,
@@ -28,6 +30,7 @@ const els = {
   originSelected: $('originSelected'), destinationSelected: $('destinationSelected'),
   routeResults: $('routeResults'), liveSection: $('liveSection'), alertSection: $('alertSection'),
   chosenRoute: $('chosenRoute'), arrivalGrid: $('arrivalGrid'), pushState: $('pushState'),
+  busCount: $('busCount'), mapNote: $('mapNote'), nearbyOrigin: $('nearbyOrigin'),
   toast: $('toast'), alarmAudio: $('alarmAudio'), alertInfo: $('alertInfo')
 };
 
@@ -82,6 +85,30 @@ function stationLabel(station) {
   return `${station.stationName} · ${station.regionName || ''}${station.mobileNo ? ` · ${station.mobileNo}` : ''}`;
 }
 
+function stationMeta(station, nearby = false) {
+  const parts = [];
+  if (station.regionName) parts.push(esc(station.regionName));
+  if (station.mobileNo) parts.push(`정류소 ${esc(station.mobileNo)}`);
+  if (nearby && Number.isFinite(number(station.distance, NaN))) parts.push(`현재 위치에서 ${Math.round(number(station.distance))}m`);
+  return parts.join(' · ');
+}
+
+function renderStationSuggestions(kind, stations, { nearby = false } = {}) {
+  const listEl = kind === 'origin' ? els.originSuggestions : els.destinationSuggestions;
+  if (!stations.length) {
+    listEl.innerHTML = `<div class="empty">${nearby ? '반경 500m 안에 경기도 정류장이 없습니다.' : '검색 결과가 없습니다.'}</div>`;
+    return;
+  }
+  listEl.innerHTML = stations.map((station, index) => `
+    <button class="suggestion${nearby ? ' nearby-suggestion' : ''}" data-kind="${kind}" data-index="${index}">
+      <strong>${esc(station.stationName)}</strong>
+      <span>${stationMeta(station, nearby)}</span>
+    </button>`).join('');
+  listEl.querySelectorAll('.suggestion').forEach(button => {
+    button.addEventListener('click', () => selectStation(kind, stations[Number(button.dataset.index)]));
+  });
+}
+
 async function searchStations(kind) {
   const input = kind === 'origin' ? els.originInput : els.destinationInput;
   const listEl = kind === 'origin' ? els.originSuggestions : els.destinationSuggestions;
@@ -92,29 +119,69 @@ async function searchStations(kind) {
     const { items } = await api('stationSearch', { keyword });
     const filtered = items
       .filter(item => String(item.regionName || '').includes('안양') || String(item.stationName || '').includes(keyword))
-      .slice(0, 12);
-    if (!filtered.length) {
-      listEl.innerHTML = '<div class="empty">검색 결과가 없습니다.</div>';
-      return;
-    }
-    listEl.innerHTML = filtered.map((station, index) => `
-      <button class="suggestion" data-kind="${kind}" data-index="${index}">
-        <strong>${esc(station.stationName)}</strong>
-        <span>${esc(station.regionName || '')}${station.mobileNo ? ` · 정류소 ${esc(station.mobileNo)}` : ''}</span>
-      </button>`).join('');
-    listEl.querySelectorAll('.suggestion').forEach(button => {
-      button.addEventListener('click', () => selectStation(kind, filtered[Number(button.dataset.index)]));
-    });
+      .slice(0, 15);
+    renderStationSuggestions(kind, filtered);
   } catch (error) {
     listEl.innerHTML = `<div class="empty error">${esc(error.message)}</div>`;
     updateApiState(error);
   }
 }
 
+function geolocationMessage(error) {
+  if (error?.code === 1) return '위치 권한이 차단되었습니다. 브라우저 설정에서 이 사이트의 위치 접근을 허용해 주세요.';
+  if (error?.code === 2) return '현재 위치를 확인할 수 없습니다. 위치 서비스를 켜고 다시 시도해 주세요.';
+  if (error?.code === 3) return '위치 확인 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.';
+  return '현재 위치를 가져오지 못했습니다.';
+}
+
+async function findNearbyOriginStations() {
+  if (!navigator.geolocation) return toast('이 브라우저는 현재 위치 기능을 지원하지 않습니다.', 4000);
+  const listEl = els.originSuggestions;
+  const button = els.nearbyOrigin;
+  button.disabled = true;
+  button.classList.add('loading');
+  listEl.innerHTML = '<div class="empty">현재 위치를 확인하는 중…</div>';
+
+  navigator.geolocation.getCurrentPosition(async position => {
+    const { latitude, longitude, accuracy } = position.coords;
+    state.userLocation = { lat: latitude, lng: longitude, accuracy: number(accuracy, 0) };
+    try {
+      listEl.innerHTML = '<div class="empty">가까운 정류장을 찾는 중…</div>';
+      const { items } = await api('stationAround', {
+        x: longitude.toFixed(7),
+        y: latitude.toFixed(7)
+      });
+      const nearby = items
+        .sort((a, b) => number(a.distance, 999999) - number(b.distance, 999999))
+        .slice(0, 15);
+      renderStationSuggestions('origin', nearby, { nearby: true });
+      els.originInput.value = '내 주변 정류장';
+      if (nearby.length) toast(`현재 위치 반경 500m에서 ${nearby.length}개 정류장을 찾았습니다.`);
+      if (state.map) renderMap(false);
+    } catch (error) {
+      listEl.innerHTML = `<div class="empty error">${esc(error.message)}</div>`;
+      updateApiState(error);
+    } finally {
+      button.disabled = false;
+      button.classList.remove('loading');
+    }
+  }, error => {
+    listEl.innerHTML = `<div class="empty error">${esc(geolocationMessage(error))}</div>`;
+    button.disabled = false;
+    button.classList.remove('loading');
+  }, {
+    enableHighAccuracy: true,
+    timeout: 12000,
+    maximumAge: 60000
+  });
+}
+
 function selectStation(kind, station) {
   state[kind] = station;
   const selected = kind === 'origin' ? els.originSelected : els.destinationSelected;
   const suggestions = kind === 'origin' ? els.originSuggestions : els.destinationSuggestions;
+  const input = kind === 'origin' ? els.originInput : els.destinationInput;
+  input.value = station.stationName;
   selected.textContent = stationLabel(station);
   selected.classList.add('ready');
   suggestions.innerHTML = '';
@@ -180,6 +247,10 @@ async function chooseRoute(pair) {
   state.routeStations = [];
   state.locations = [];
   state.arrival = null;
+  state.mapScope = 'full';
+  document.querySelectorAll('[data-map-scope]').forEach(button => {
+    button.classList.toggle('active', button.dataset.mapScope === 'full');
+  });
   state.foregroundAlarmKey = '';
   state.route = {
     routeId: pair.originRoute.routeId,
@@ -252,6 +323,12 @@ function interpolateBusPosition(location) {
   return [y1 + (y2 - y1) * ratio, x1 + (x2 - x1) * ratio];
 }
 
+function stationPosition(stop) {
+  const lat = number(stop?.y, NaN);
+  const lng = number(stop?.x, NaN);
+  return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null;
+}
+
 function ensureMap() {
   if (state.map) return state.map;
   state.map = L.map('map', { zoomControl: true }).setView([37.39, 126.95], 13);
@@ -264,37 +341,109 @@ function ensureMap() {
   return state.map;
 }
 
+function stopMarkerClass(seq) {
+  if (seq === state.route.originStaOrder) return 'origin';
+  if (seq === state.route.destinationStaOrder) return 'destination';
+  if (seq < state.route.originStaOrder) return 'approach';
+  if (seq > state.route.destinationStaOrder) return 'after';
+  return 'journey';
+}
+
+function busMapStatus(seq) {
+  if (seq < state.route.originStaOrder) {
+    const remaining = Math.max(0, state.route.originStaOrder - seq);
+    return { className: 'approach', label: `탑승 정류장까지 약 ${remaining}정거장` };
+  }
+  if (seq <= state.route.destinationStaOrder) {
+    const remaining = Math.max(0, state.route.destinationStaOrder - seq);
+    return { className: 'journey', label: `탑승 정류장 통과 · 목적지까지 약 ${remaining}정거장` };
+  }
+  return { className: 'after', label: '목적지를 지난 운행 차량' };
+}
+
+function drawPolyline(stops, options) {
+  const latlngs = stops.map(stationPosition).filter(Boolean);
+  if (latlngs.length > 1) L.polyline(latlngs, options).addTo(state.routeLayer);
+  return latlngs;
+}
+
 function renderMap(fit = false) {
   const map = ensureMap();
   state.routeLayer.clearLayers();
   state.markerLayer.clearLayers();
 
-  const segment = state.routeStations.filter(s => {
-    const seq = number(s.stationSeq);
+  const ordered = [...state.routeStations].sort((a, b) => number(a.stationSeq) - number(b.stationSeq));
+  const allLatlngs = drawPolyline(ordered, { color: '#8fa7c0', weight: 4, opacity: .42 });
+  const approachStops = ordered.filter(stop => number(stop.stationSeq) <= state.route.originStaOrder);
+  const journeyStops = ordered.filter(stop => {
+    const seq = number(stop.stationSeq);
     return seq >= state.route.originStaOrder && seq <= state.route.destinationStaOrder;
   });
-  const latlngs = segment.map(s => [number(s.y, NaN), number(s.x, NaN)]).filter(([lat, lng]) => Number.isFinite(lat) && Number.isFinite(lng));
-  if (latlngs.length > 1) L.polyline(latlngs, { color: '#1859d9', weight: 5, opacity: .8 }).addTo(state.routeLayer);
+  const afterStops = ordered.filter(stop => number(stop.stationSeq) >= state.route.destinationStaOrder);
 
-  segment.forEach(stop => {
-    const pos = [number(stop.y, NaN), number(stop.x, NaN)];
-    if (!pos.every(Number.isFinite)) return;
-    const icon = L.divIcon({ className: '', html: '<div class="stop-marker"></div>', iconSize: [13,13], iconAnchor: [6,6] });
-    L.marker(pos, { icon }).bindPopup(`<strong>${esc(stop.stationName)}</strong><br>${number(stop.stationSeq)}번째 정류장`).addTo(state.markerLayer);
+  drawPolyline(approachStops, { color: '#23b9ee', weight: 5, opacity: .9, dashArray: '8 8' });
+  const journeyLatlngs = drawPolyline(journeyStops, { color: '#1859d9', weight: 6, opacity: .92 });
+  drawPolyline(afterStops, { color: '#8b98aa', weight: 4, opacity: .32, dashArray: '4 9' });
+
+  ordered.forEach(stop => {
+    const pos = stationPosition(stop);
+    if (!pos) return;
+    const seq = number(stop.stationSeq);
+    const markerClass = stopMarkerClass(seq);
+    const icon = L.divIcon({
+      className: '',
+      html: `<div class="stop-marker ${markerClass}"></div>`,
+      iconSize: markerClass === 'origin' || markerClass === 'destination' ? [18, 18] : [11, 11],
+      iconAnchor: markerClass === 'origin' || markerClass === 'destination' ? [9, 9] : [5, 5]
+    });
+    const stopLabel = markerClass === 'origin' ? '탑승 정류장' : markerClass === 'destination' ? '도착 정류장' : `${seq}번째 정류장`;
+    L.marker(pos, { icon })
+      .bindPopup(`<strong>${esc(stop.stationName)}</strong><br>${stopLabel}`)
+      .addTo(state.markerLayer);
   });
 
   state.locations.forEach(bus => {
     const seq = number(bus.stationSeq);
-    if (seq < state.route.originStaOrder - 8 || seq > state.route.destinationStaOrder + 2) return;
     const pos = interpolateBusPosition(bus);
     if (!pos) return;
-    const icon = L.divIcon({ className: '', html: '<div class="bus-marker"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17h12M7 4h10a3 3 0 0 1 3 3v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3Zm-1 9h12M8 8h8M7 21v-3m10 3v-3"/></svg></div>', iconSize: [38,38], iconAnchor: [19,19] });
+    const status = busMapStatus(seq);
+    const icon = L.divIcon({
+      className: '',
+      html: `<div class="bus-marker ${status.className}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17h12M7 4h10a3 3 0 0 1 3 3v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3Zm-1 9h12M8 8h8M7 21v-3m10 3v-3"/></svg></div>`,
+      iconSize: [40, 40],
+      iconAnchor: [20, 20]
+    });
     L.marker(pos, { icon, zIndexOffset: 1000 })
-      .bindPopup(`<strong>${esc(state.route.routeName)}번</strong><br>${esc(bus.plateNo || '')}<br>${number(bus.stationSeq)}번째 정류장 부근`)
+      .bindPopup(`<strong>${esc(state.route.routeName)}번</strong><br>${esc(bus.plateNo || '차량번호 확인 중')}<br>${esc(status.label)}<br>${seq}번째 정류장 부근`)
       .addTo(state.markerLayer);
   });
 
-  if (fit && latlngs.length) map.fitBounds(latlngs, { padding: [28, 28] });
+  if (state.userLocation) {
+    const userPos = [state.userLocation.lat, state.userLocation.lng];
+    if (state.userLocation.accuracy > 0) {
+      L.circle(userPos, {
+        radius: Math.min(Math.max(state.userLocation.accuracy, 20), 250),
+        color: '#0f86ff', weight: 1, opacity: .45, fillColor: '#28a5ff', fillOpacity: .09
+      }).addTo(state.markerLayer);
+    }
+    const icon = L.divIcon({
+      className: '',
+      html: '<div class="current-location-marker"><span></span></div>',
+      iconSize: [24, 24], iconAnchor: [12, 12]
+    });
+    L.marker(userPos, { icon, zIndexOffset: 1200 }).bindPopup('<strong>내 현재 위치</strong>').addTo(state.markerLayer);
+  }
+
+  els.busCount.textContent = `${state.locations.length}대 운행 중 · 30초 갱신`;
+  els.mapNote.textContent = state.mapScope === 'full'
+    ? '전체 노선의 정류장과 운행 중인 모든 버스를 표시합니다. 점선 구간은 탑승 정류장으로 접근하는 차량 구간입니다.'
+    : '탑승 정류장부터 목적지까지 확대해 표시합니다. “전체 노선”을 누르면 이전 정류장 쪽 차량도 모두 볼 수 있습니다.';
+
+  if (fit) {
+    const fitLatlngs = state.mapScope === 'journey' && journeyLatlngs.length ? journeyLatlngs : allLatlngs;
+    if (fitLatlngs.length > 1) map.fitBounds(fitLatlngs, { padding: [32, 32], maxZoom: 16 });
+    else if (fitLatlngs.length === 1) map.setView(fitLatlngs[0], 15);
+  }
   setTimeout(() => map.invalidateSize(), 100);
 }
 
@@ -466,11 +615,17 @@ function buildAlertPayload(fcmToken) {
 
 function setupEvents() {
   $('originSearch').addEventListener('click', () => searchStations('origin'));
+  els.nearbyOrigin.addEventListener('click', findNearbyOriginStations);
   $('destinationSearch').addEventListener('click', () => searchStations('destination'));
   $('findRoutes').addEventListener('click', findRoutes);
   $('refreshLive').addEventListener('click', () => loadLive(false));
   $('saveAlert').addEventListener('click', saveAlert);
   $('testAlert').addEventListener('click', () => { playAlarm(); toast('알림 소리를 재생했습니다.'); });
+  document.querySelectorAll('[data-map-scope]').forEach(button => button.addEventListener('click', () => {
+    state.mapScope = button.dataset.mapScope;
+    document.querySelectorAll('[data-map-scope]').forEach(item => item.classList.toggle('active', item === button));
+    if (state.route) renderMap(true);
+  }));
   $('swapStops').addEventListener('click', () => {
     [state.origin, state.destination] = [state.destination, state.origin];
     [els.originInput.value, els.destinationInput.value] = [els.destinationInput.value, els.originInput.value];
