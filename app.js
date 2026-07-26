@@ -41,7 +41,11 @@ const state = {
   savedAlertAlarmKeys: new Map(),
   destinationFavorites: [],
   alertSaveBusy: false,
-  pushRetryAfter: 0
+  pushRetryAfter: 0,
+  audioUnlocked: false,
+  audioUnlockBusy: false,
+  sharedAudioContext: null,
+  audioFailureToastAt: 0
 };
 
 const els = {
@@ -2224,37 +2228,128 @@ let customAlertAudio = null;
 
 function getCustomAlertAudio() {
   if (!customAlertAudio) {
-    customAlertAudio = new Audio('/assets/future-bus-alert.mp3?v=2.5.0');
+    customAlertAudio = $('futureBusAudio') || new Audio();
+    if (!customAlertAudio.src) customAlertAudio.src = new URL('/assets/future-bus-alert.mp3?v=2.6.0', window.location.origin).href;
     customAlertAudio.preload = 'auto';
     customAlertAudio.playsInline = true;
+    customAlertAudio.setAttribute('playsinline', '');
+    customAlertAudio.setAttribute('webkit-playsinline', '');
     customAlertAudio.volume = 0.92;
+    try { customAlertAudio.load(); } catch (_) { /* 브라우저별 load 제한 무시 */ }
   }
   return customAlertAudio;
 }
 
-async function playFutureBusAlert() {
+function getSharedAudioContext() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  if (!state.sharedAudioContext || state.sharedAudioContext.state === 'closed') {
+    state.sharedAudioContext = new AudioContextClass();
+  }
+  return state.sharedAudioContext;
+}
+
+async function unlockAudioFromGesture() {
+  if (state.audioUnlocked || state.audioUnlockBusy) return state.audioUnlocked;
+  state.audioUnlockBusy = true;
+  let unlocked = false;
+  let audio = null;
+  let previousMuted = false;
+  let previousVolume = 0.92;
+  let playback = null;
+
+  // 중요: iOS의 사용자 제스처가 유지되는 첫 동기 구간에서 play()를 먼저 호출한다.
+  try {
+    audio = getCustomAlertAudio();
+    previousMuted = audio.muted;
+    previousVolume = audio.volume;
+    audio.muted = true;
+    audio.volume = 0;
+    audio.currentTime = 0;
+    playback = audio.play();
+  } catch (error) {
+    console.debug('html audio unlock start skipped', error);
+  }
+
+  let contextResume = null;
+  try {
+    const ctx = getSharedAudioContext();
+    if (ctx) {
+      contextResume = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      gain.gain.value = 0.00001;
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.025);
+    }
+  } catch (error) {
+    console.debug('web audio unlock start skipped', error);
+  }
+
+  try {
+    if (playback?.then) await playback;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+      audio.muted = previousMuted;
+      audio.volume = previousVolume || 0.92;
+      unlocked = true;
+    }
+  } catch (error) {
+    console.debug('html audio unlock skipped', error);
+    if (audio) {
+      audio.muted = previousMuted;
+      audio.volume = previousVolume || 0.92;
+    }
+  }
+
+  try {
+    if (contextResume?.then) await contextResume;
+    const ctx = state.sharedAudioContext;
+    unlocked = unlocked || ctx?.state === 'running';
+  } catch (error) {
+    console.debug('web audio unlock skipped', error);
+  } finally {
+    state.audioUnlockBusy = false;
+  }
+  state.audioUnlocked = unlocked;
+  return unlocked;
+}
+
+async function playFutureBusAlert({ fromTest = false, fallback = true } = {}) {
   const audio = getCustomAlertAudio();
   try {
     audio.pause();
+    audio.muted = false;
+    audio.volume = 0.92;
     audio.currentTime = 0;
-    await audio.play();
+    const playback = audio.play();
+    if (playback?.then) await playback;
+    state.audioUnlocked = true;
+    return true;
   } catch (error) {
     console.warn('custom alert audio playback failed', error);
-    toast('기기에서 알림음 재생이 차단됐습니다. 알림 테스트를 한 번 눌러 주세요.', 4500);
+    const now = Date.now();
+    if (fromTest || now - state.audioFailureToastAt > 12000) {
+      state.audioFailureToastAt = now;
+      const detail = error?.name === 'NotAllowedError'
+        ? '화면을 한 번 누른 뒤 다시 테스트해 주세요.'
+        : '음원 재생에 실패해 기본 차임으로 대신 재생합니다.';
+      toast(`미래형 알림음 재생 실패 · ${detail}`, 4500);
+    }
+    if (fallback) playToneAlarm('chime', { vibrate: false });
+    return false;
   }
 }
 
-function playAlarm(sound = 'standard', { vibrate = true } = {}) {
+function playToneAlarm(sound = 'standard', { vibrate = true } = {}) {
   if (vibrate) navigator.vibrate?.([280, 110, 280, 110, 480]);
-  if (sound === 'futureBus') {
-    void playFutureBusAlert();
-    return;
-  }
   const pattern = soundPattern(sound);
-  if (!pattern.notes.length) return;
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return;
-  const ctx = new AudioContextClass();
+  if (!pattern.notes.length) return false;
+  const ctx = getSharedAudioContext();
+  if (!ctx) return false;
+  if (ctx.state === 'suspended') void ctx.resume().catch(() => undefined);
   pattern.notes.forEach(([offset, frequency, duration]) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -2267,7 +2362,44 @@ function playAlarm(sound = 'standard', { vibrate = true } = {}) {
     osc.start(ctx.currentTime + offset);
     osc.stop(ctx.currentTime + offset + duration + .03);
   });
-  setTimeout(() => Promise.resolve(ctx.close?.()).catch(() => undefined), 2500);
+  return true;
+}
+
+function playAlarm(sound = 'standard', { vibrate = true } = {}) {
+  if (sound === 'futureBus') {
+    if (vibrate) navigator.vibrate?.([280, 110, 280, 110, 480]);
+    void playFutureBusAlert({ fallback: true });
+    return;
+  }
+  playToneAlarm(sound, { vibrate });
+}
+
+async function testConfiguredAlert() {
+  const button = $('testAlert');
+  const original = button.innerHTML;
+  button.disabled = true;
+  const mode = $('alertMode').value || 'push';
+  const sound = $('alertSound').value || 'standard';
+  try {
+    button.textContent = '알림음 준비 중…';
+    if (!alertModeUsesSound(mode)) {
+      if (alertModeUsesVibration(mode)) navigator.vibrate?.([280, 110, 280, 110, 480]);
+      toast(`${alertModeLabel(mode)} 테스트를 실행했습니다.`);
+      return;
+    }
+    if (sound === 'futureBus') {
+      // click 제스처의 첫 동기 구간에서 바로 play()가 호출되도록 다른 await보다 먼저 실행한다.
+      const played = await playFutureBusAlert({ fromTest: true, fallback: true });
+      if (played) toast('미래형 버스 알림음을 재생했습니다.');
+      return;
+    }
+    await unlockAudioFromGesture();
+    playToneAlarm(sound, { vibrate: alertModeUsesVibration(mode) });
+    toast(`${alertSoundLabel(sound)} 테스트를 재생했습니다.`);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = original;
+  }
 }
 
 function playConfiguredAlert(alertConfig = null) {
@@ -2386,7 +2518,7 @@ async function initFirebase() {
     if ('serviceWorker' in navigator) {
       try {
         state.swRegistration = await withTimeout(
-          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.5.0', { scope: '/' }),
+          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.6.0', { scope: '/' }),
           8000,
           '서비스워커 연결 시간이 초과되었습니다.'
         );
@@ -2640,7 +2772,7 @@ function setupEvents() {
   $('findRoutes').addEventListener('click', findRoutes);
   $('refreshLive').addEventListener('click', () => loadLive(true, { manual: true }));
   $('saveAlert').addEventListener('click', saveAlert);
-  $('testAlert').addEventListener('click', () => { playConfiguredAlert(); toast(`${alertSoundLabel($('alertSound').value)} 테스트를 재생했습니다.`); });
+  $('testAlert').addEventListener('click', testConfiguredAlert);
   els.toggleDestinationFavorite?.addEventListener('click', toggleDestinationFavorite);
   document.querySelectorAll('[data-map-scope]').forEach(button => button.addEventListener('click', () => {
     state.mapScope = button.dataset.mapScope;
@@ -2708,6 +2840,14 @@ async function boot() {
   updateDestinationFavoriteControl();
   startSavedAlertPolling();
   setupEvents();
+  // iOS/iPadOS는 첫 사용자 제스처에서 오디오 객체를 미리 해제해야 이후 자동 알림음이 재생된다.
+  const primeAudio = event => {
+    // 테스트 버튼은 click 핸들러에서 실제 음원을 즉시 재생하므로 사전 무음 재생과 경합시키지 않는다.
+    if (event?.target?.closest?.('#testAlert')) return;
+    void unlockAudioFromGesture();
+  };
+  document.addEventListener('pointerdown', primeAudio, { once: true, capture: true, passive: true });
+  document.addEventListener('keydown', primeAudio, { once: true, capture: true });
   initFirebase();
   try {
     await api('stationSearch', { keyword: '호계현대홈타운.e편한세상아파트' });
