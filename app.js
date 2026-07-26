@@ -40,7 +40,8 @@ const state = {
   savedAlertPoller: null,
   savedAlertAlarmKeys: new Map(),
   destinationFavorites: [],
-  alertSaveBusy: false
+  alertSaveBusy: false,
+  pushRetryAfter: 0
 };
 
 const els = {
@@ -63,6 +64,34 @@ const NEARBY_RESULT_RADIUS_METERS = 1800;
 const STORED_LOCATION_MAX_AGE_MS = 15 * 60 * 1000;
 const SAVED_ALERTS_KEY = 'hogyeBusAlertsV2';
 const DESTINATION_FAVORITES_KEY = 'hogyeBusDestinationFavoritesV1';
+const PUSH_CONNECT_TIMEOUT_MS = 10000;
+
+function isAppleMobileBrowser() {
+  const ua = navigator.userAgent || '';
+  return /iPad|iPhone|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+
+function isStandaloneWebApp() {
+  return window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+}
+
+function withTimeout(promise, timeoutMs, message = '요청 시간이 초과되었습니다.') {
+  let timer;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    })
+  ]).finally(() => clearTimeout(timer));
+}
+
+function friendlyPushError(error) {
+  const message = String(error?.message || error || '알 수 없는 오류');
+  if (/시간이 초과|timeout/i.test(message)) return '푸시 서버 응답이 없어 연결을 중단했습니다.';
+  if (/permission|denied|blocked/i.test(message)) return '알림 권한이 차단되어 있습니다.';
+  if (/token|registration/i.test(message)) return '푸시 토큰을 발급받지 못했습니다.';
+  return message;
+}
 
 function toast(message, ms = 2600) {
   els.toast.textContent = message;
@@ -2167,9 +2196,25 @@ function startPolling() {
 
 async function initFirebase() {
   try {
-    const configResponse = await fetch('/api/config', { cache: 'no-store' });
+    const configResponse = await withTimeout(
+      fetch('/api/config', { cache: 'no-store' }),
+      8000,
+      'Firebase 설정을 불러오는 시간이 초과되었습니다.'
+    );
     state.firebaseConfig = await configResponse.json();
-    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.2.0', { scope: '/' });
+
+    if ('serviceWorker' in navigator) {
+      try {
+        state.swRegistration = await withTimeout(
+          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.3.0', { scope: '/' }),
+          8000,
+          '서비스워커 연결 시간이 초과되었습니다.'
+        );
+      } catch (swError) {
+        state.swRegistration = null;
+        console.warn('service worker registration failed', swError);
+      }
+    }
 
     if (!state.firebaseConfig.backgroundPushConfigured) {
       els.pushState.textContent = '화면 켤 때만';
@@ -2182,7 +2227,18 @@ async function initFirebase() {
     const firestore = getFirestore(app);
     state.firebase = { app, auth, user: null, firestore, messaging: null };
 
-    if (await isSupported()) {
+    // Firebase Web Messaging SDK는 iOS/iPadOS Safari를 공식 지원 대상으로 두지 않는다.
+    // Apple 모바일에서는 토큰 발급을 시도하지 않아 무한 대기 UI를 방지한다.
+    let messagingSupported = false;
+    if (!isAppleMobileBrowser()) {
+      try {
+        messagingSupported = await withTimeout(isSupported(), 3500, '푸시 지원 확인 시간이 초과되었습니다.');
+      } catch (supportError) {
+        console.warn('messaging support check failed', supportError);
+      }
+    }
+
+    if (messagingSupported) {
       state.firebase.messaging = getMessaging(app);
       onMessage(state.firebase.messaging, payload => {
         const title = payload.notification?.title || payload.data?.title || '우리 버스 알림';
@@ -2195,11 +2251,24 @@ async function initFirebase() {
     }
 
     try {
-      const credential = await signInAnonymously(auth);
+      const credential = await withTimeout(
+        signInAnonymously(auth),
+        10000,
+        'Firebase 로그인 시간이 초과되었습니다.'
+      );
       state.firebase.user = credential.user;
       state.firebaseAuthError = null;
-      els.pushState.textContent = state.firebase.messaging ? '푸시 준비됨' : '로컬 알림';
-      els.pushState.classList.toggle('good', Boolean(state.firebase.messaging));
+
+      if (isAppleMobileBrowser()) {
+        els.pushState.textContent = '기기 저장';
+        els.pushState.classList.add('good');
+        els.alertInfo.textContent = isStandaloneWebApp()
+          ? 'iPhone·iPad에서는 현재 Firebase 웹 푸시 대신 앱 실행 중 자동 감시가 동작합니다. 알림 설정은 기기에 정상 저장됩니다.'
+          : 'iPhone·iPad에서는 홈 화면에 추가한 앱으로 실행해야 웹 알림을 사용할 수 있습니다. 현재 설정은 기기에 저장됩니다.';
+      } else {
+        els.pushState.textContent = state.firebase.messaging ? '푸시 준비됨' : '로컬 알림';
+        els.pushState.classList.toggle('good', Boolean(state.firebase.messaging));
+      }
     } catch (authError) {
       state.firebaseAuthError = authError;
       console.warn('Firebase anonymous auth unavailable', authError);
@@ -2207,7 +2276,7 @@ async function initFirebase() {
       els.pushState.classList.remove('good');
       const configurationMissing = String(authError?.code || '').includes('configuration-not-found');
       els.alertInfo.textContent = configurationMissing
-        ? 'Firebase 콘솔에서 Authentication → 로그인 방법 → 익명(Anonymous)을 사용 설정하면 백그라운드 알림 저장이 활성화됩니다. 현재는 앱을 열어둔 동안 알림이 동작합니다.'
+        ? 'Firebase 콘솔에서 Authentication → 로그인 방법 → 익명(Anonymous)을 사용 설정하면 서버 저장이 활성화됩니다. 현재는 앱을 열어둔 동안 알림이 동작합니다.'
         : `Firebase 익명 로그인 실패: ${authError.message}. 현재는 앱을 열어둔 동안 알림이 동작합니다.`;
     }
   } catch (error) {
@@ -2230,12 +2299,12 @@ async function saveAlert() {
   button.textContent = '기기에 저장 중…';
 
   try {
-    // 푸시 권한이나 Firebase 상태와 무관하게 먼저 기기에 저장한다.
+    // 네트워크와 푸시 상태에 관계없이 기기 저장을 먼저 확정한다.
     upsertSavedAlert(localPayload);
     button.textContent = '기기 저장 완료';
     els.pushState.textContent = '기기 저장됨';
     els.pushState.classList.add('good');
-    els.alertInfo.textContent = `${localPayload.routeName}번 알림이 이 기기에 저장되었습니다. 푸시 연결 상태를 확인하고 있습니다…`;
+    els.alertInfo.textContent = `${localPayload.routeName}번 알림이 이 기기에 저장되었습니다.`;
     toast(`${localPayload.routeName}번 알림을 기기에 저장했습니다.`);
 
     let notificationPermission = 'unsupported';
@@ -2243,11 +2312,26 @@ async function saveAlert() {
       notificationPermission = Notification.permission;
       if (notificationPermission === 'default') {
         try {
-          notificationPermission = await Notification.requestPermission();
+          notificationPermission = await withTimeout(
+            Notification.requestPermission(),
+            8000,
+            '알림 권한 요청 시간이 초과되었습니다.'
+          );
         } catch (permissionError) {
           console.warn('notification permission request failed', permissionError);
         }
       }
+    }
+
+    // iPhone/iPad에서 Firebase getToken을 호출하면 응답 없이 대기할 수 있어 시도 자체를 생략한다.
+    if (isAppleMobileBrowser()) {
+      els.pushState.textContent = '기기 저장됨';
+      els.pushState.classList.add('good');
+      els.alertInfo.textContent = isStandaloneWebApp()
+        ? `기기 저장 완료 · iPhone·iPad에서는 앱이 열려 있을 때 ${localPayload.routeName}번을 자동 감시합니다.`
+        : '기기 저장 완료 · 홈 화면에 추가한 앱으로 실행하면 기기 알림을 사용할 수 있습니다.';
+      button.textContent = '기기 저장 완료';
+      return;
     }
 
     const remoteReady = Boolean(
@@ -2269,27 +2353,45 @@ async function saveAlert() {
       els.pushState.textContent = '화면 켤 때 감시';
       els.pushState.classList.remove('good');
       els.alertInfo.textContent = `기기 저장 완료 · ${reason} 앱을 열어둔 동안 저장된 노선을 자동 확인합니다.`;
+      button.textContent = '기기 저장 완료';
+      return;
+    }
+
+    if (Date.now() < state.pushRetryAfter) {
+      els.pushState.textContent = '기기 저장됨';
+      els.pushState.classList.add('good');
+      els.alertInfo.textContent = '기기 저장 완료 · 직전 푸시 연결이 지연되어 잠시 후 다시 시도할 수 있습니다.';
+      button.textContent = '기기 저장 완료';
       return;
     }
 
     try {
-      button.textContent = '푸시 연결 중…';
-      const token = await getToken(state.firebase.messaging, {
-        vapidKey: state.firebaseConfig.vapidKey,
-        serviceWorkerRegistration: state.swRegistration
-      });
+      button.textContent = '푸시 연결 확인 중…';
+      const token = await withTimeout(
+        getToken(state.firebase.messaging, {
+          vapidKey: state.firebaseConfig.vapidKey,
+          serviceWorkerRegistration: state.swRegistration
+        }),
+        PUSH_CONNECT_TIMEOUT_MS,
+        '푸시 토큰 연결 시간이 초과되었습니다.'
+      );
       if (!token) throw new Error('푸시 토큰을 발급받지 못했습니다.');
 
       const payload = buildAlertPayload(token);
       const id = `${state.firebase.user.uid}_${state.route.routeId}_${state.origin.stationId}`;
-      await setDoc(doc(state.firebase.firestore, 'busAlerts', id), {
-        ...payload,
-        uid: state.firebase.user.uid,
-        armed: true,
-        updatedAt: serverTimestamp(),
-        createdAt: serverTimestamp()
-      }, { merge: true });
+      await withTimeout(
+        setDoc(doc(state.firebase.firestore, 'busAlerts', id), {
+          ...payload,
+          uid: state.firebase.user.uid,
+          armed: true,
+          updatedAt: serverTimestamp(),
+          createdAt: serverTimestamp()
+        }, { merge: true }),
+        10000,
+        '푸시 설정 서버 저장 시간이 초과되었습니다.'
+      );
       upsertSavedAlert({ ...payload, _docId: id });
+      state.pushRetryAfter = 0;
       els.pushState.textContent = '자동 감시 중';
       els.pushState.classList.add('good');
       els.alertInfo.textContent = `${payload.routeName}번 저장 완료 · ${payload.startTime}~${payload.endTime} · ${payload.leadStops}정거장 전 · ${alertSoundLabel(payload.alertSound)}`;
@@ -2297,11 +2399,13 @@ async function saveAlert() {
       toast(`${payload.routeName}번 알림을 기기와 푸시에 저장했습니다.`, 3800);
     } catch (remoteError) {
       console.warn('remote alert save failed; local save retained', remoteError);
+      state.pushRetryAfter = Date.now() + 2 * 60 * 1000;
+      const friendly = friendlyPushError(remoteError);
       els.pushState.textContent = '기기 저장됨';
       els.pushState.classList.add('good');
-      els.alertInfo.textContent = `기기 저장은 완료했습니다. 푸시 서버 저장만 실패했습니다: ${remoteError.message}`;
+      els.alertInfo.textContent = `기기 저장은 완료했습니다. ${friendly} 앱을 열어둔 동안의 자동 감시는 계속 동작합니다.`;
       button.textContent = '기기 저장 완료';
-      toast(`기기 저장 완료 · 푸시 연결 실패: ${remoteError.message}`, 4800);
+      toast(`기기 저장 완료 · ${friendly}`, 4800);
     }
   } catch (error) {
     els.pushState.textContent = '저장 실패';
@@ -2313,7 +2417,7 @@ async function saveAlert() {
       button.textContent = state.route ? `${state.route.routeName}번 알림 저장` : originalText;
       button.disabled = false;
       state.alertSaveBusy = false;
-    }, 900);
+    }, 600);
   }
 }
 
