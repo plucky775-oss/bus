@@ -150,11 +150,24 @@ function parseXmlResponse(text, spec) {
 }
 
 function extractJsonPayload(json, dataKey) {
+  const findDeep = (value, key, depth = 0, seen = new Set()) => {
+    if (!value || typeof value !== 'object' || depth > 10 || seen.has(value)) return undefined;
+    seen.add(value);
+    if (Object.prototype.hasOwnProperty.call(value, key)) return value[key];
+    for (const child of Object.values(value)) {
+      const found = findDeep(child, key, depth + 1, seen);
+      if (found !== undefined) return found;
+    }
+    return undefined;
+  };
   const response = json?.response || json;
-  const commonHeader = response?.comMsgHeader || json?.comMsgHeader || json?.OpenAPI_ServiceResponse?.cmmMsgHeader || {};
-  const header = response?.msgHeader || response?.header || json?.msgHeader || {};
-  const body = response?.msgBody || response?.body || json?.msgBody || {};
-  const value = body?.[dataKey] ?? response?.[dataKey] ?? json?.[dataKey] ?? null;
+  const commonHeader = response?.comMsgHeader || json?.comMsgHeader || json?.OpenAPI_ServiceResponse?.cmmMsgHeader || findDeep(json, 'comMsgHeader') || {};
+  const header = response?.msgHeader || response?.header || json?.msgHeader || findDeep(json, 'msgHeader') || {};
+  let value = response?.msgBody?.[dataKey] ?? response?.body?.[dataKey] ?? json?.msgBody?.[dataKey] ?? response?.[dataKey] ?? json?.[dataKey];
+  if (value === undefined) value = findDeep(json, dataKey);
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    value = value.item ?? value.items?.item ?? value.items ?? value;
+  }
 
   return {
     format: 'json',
@@ -277,7 +290,7 @@ export default async function handler(req, res) {
     const upstream = await fetch(url, {
       headers: {
         Accept: 'application/json, application/xml;q=0.9, text/plain;q=0.5',
-        'User-Agent': 'hogye-bus-alert/1.1'
+        'User-Agent': 'hogye-bus-alert/1.6'
       },
       signal: AbortSignal.timeout(12000)
     });
@@ -294,6 +307,7 @@ export default async function handler(req, res) {
         queryTime: parsed.header?.queryTime || null,
         resultCode,
         message: resultMessage,
+        sourceFormat: parsed.format,
         ...(spec.single ? { item: null } : { items: [] })
       });
     }
@@ -324,6 +338,7 @@ export default async function handler(req, res) {
       queryTime: parsed.header?.queryTime || null,
       resultCode,
       message: resultMessage,
+      sourceFormat: parsed.format,
       ...(spec.single ? { item: parsed.value || null } : { items: asArray(parsed.value) })
     });
   } catch (error) {
