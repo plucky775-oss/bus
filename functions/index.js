@@ -104,7 +104,7 @@ async function fetchGbis(serviceKey, endpoint, params, dataKey, { single = false
   Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, String(value)));
 
   const response = await fetch(url, {
-    headers: { Accept: 'application/json, application/xml;q=0.9', 'User-Agent': 'hogye-bus-alert-functions/1.7' },
+    headers: { Accept: 'application/json, application/xml;q=0.9', 'User-Agent': 'hogye-bus-alert-functions/2.0' },
     signal: AbortSignal.timeout(12000)
   });
   const text = await response.text();
