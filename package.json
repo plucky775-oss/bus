@@ -1,6 +1,6 @@
 {
   "name": "hogye-bus-alert",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "private": true,
   "description": "버스번호별 다중 알림음, 도착지 즐겨찾기, 위치기반 주변정류소, 실시간 노선 위치를 지원하는 버스 알림 PWA",
   "scripts": {

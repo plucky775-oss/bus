@@ -2195,6 +2195,7 @@ function alertSoundLabel(sound = 'standard') {
     urgent: '긴급 알림음',
     soft: '부드러운 알림음',
     chime: '차임 알림음',
+    futureBus: '미래형 버스 알림음',
     silent: '무음'
   })[sound] || '기본 알림음';
 }
@@ -2219,8 +2220,36 @@ function soundPattern(sound = 'standard') {
   return patterns[sound] || patterns.standard;
 }
 
+let customAlertAudio = null;
+
+function getCustomAlertAudio() {
+  if (!customAlertAudio) {
+    customAlertAudio = new Audio('/assets/future-bus-alert.mp3?v=2.5.0');
+    customAlertAudio.preload = 'auto';
+    customAlertAudio.playsInline = true;
+    customAlertAudio.volume = 0.92;
+  }
+  return customAlertAudio;
+}
+
+async function playFutureBusAlert() {
+  const audio = getCustomAlertAudio();
+  try {
+    audio.pause();
+    audio.currentTime = 0;
+    await audio.play();
+  } catch (error) {
+    console.warn('custom alert audio playback failed', error);
+    toast('기기에서 알림음 재생이 차단됐습니다. 알림 테스트를 한 번 눌러 주세요.', 4500);
+  }
+}
+
 function playAlarm(sound = 'standard', { vibrate = true } = {}) {
   if (vibrate) navigator.vibrate?.([280, 110, 280, 110, 480]);
+  if (sound === 'futureBus') {
+    void playFutureBusAlert();
+    return;
+  }
   const pattern = soundPattern(sound);
   if (!pattern.notes.length) return;
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -2357,7 +2386,7 @@ async function initFirebase() {
     if ('serviceWorker' in navigator) {
       try {
         state.swRegistration = await withTimeout(
-          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.4.0', { scope: '/' }),
+          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.5.0', { scope: '/' }),
           8000,
           '서비스워커 연결 시간이 초과되었습니다.'
         );
