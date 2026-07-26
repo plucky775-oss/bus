@@ -34,7 +34,8 @@ const state = {
   lastLocationSuccessAt: 0,
   lastLiveUpdatedAt: 0,
   routeSearchId: 0,
-  routeSearchAbortController: null
+  routeSearchAbortController: null,
+  nearbyAbortController: null
 };
 
 const els = {
@@ -48,6 +49,10 @@ const els = {
   refreshLive: $('refreshLive'), refreshLiveLabel: $('refreshLiveLabel'),
   nearbyStatus: $('nearbyStatus'), liveVehicles: $('liveVehicles'), liveUpdated: $('liveUpdated')
 };
+
+const DESTINATION_WALK_RADIUS_METERS = 800;
+const NEARBY_RESULT_RADIUS_METERS = 1200;
+const STORED_LOCATION_MAX_AGE_MS = 30 * 60 * 1000;
 
 function toast(message, ms = 2600) {
   els.toast.textContent = message;
@@ -143,8 +148,10 @@ function reconcileRouteOrders(preferredOriginSeq = NaN) {
   const stations = state.routeStations || [];
   if (!stations.length || !state.route || !state.origin || !state.destination) return;
 
+  const routeDestinationId = state.route.destinationStationId || state.destination.stationId;
+  const routeDestinationName = state.route.destinationStationName || state.destination.stationName;
   const allOriginMatches = stations.filter(stop => sameId(stop.stationId, state.origin.stationId));
-  const destinationMatches = stations.filter(stop => sameId(stop.stationId, state.destination.stationId));
+  const destinationMatches = stations.filter(stop => sameId(stop.stationId, routeDestinationId));
   const forcedOrigins = Number.isFinite(preferredOriginSeq)
     ? allOriginMatches.filter(stop => routeStationSequence(stop) === preferredOriginSeq)
     : [];
@@ -174,7 +181,7 @@ function reconcileRouteOrders(preferredOriginSeq = NaN) {
     const fallbackOrigin = (Number.isFinite(preferredOriginSeq)
       ? fallbackOrigins.find(stop => routeStationSequence(stop) === preferredOriginSeq)
       : null) || fallbackOrigins[0];
-    const fallbackDestination = stations.find(stop => nameMatch(stop, state.destination)
+    const fallbackDestination = stations.find(stop => normalizeName(stop.stationName) === normalizeName(routeDestinationName)
       && routeStationSequence(stop) > routeStationSequence(fallbackOrigin));
     if (fallbackOrigin && fallbackDestination) {
       state.route.originStaOrder = routeStationSequence(fallbackOrigin);
@@ -199,8 +206,13 @@ function arrivalHasAnyVehicle(item) {
 }
 
 function destinationExistsAfter(originSeq) {
-  return state.routeStations.some(stop => sameId(stop.stationId, state.destination?.stationId)
-    && routeStationSequence(stop) > originSeq);
+  const destinationId = state.route?.destinationStationId || state.destination?.stationId;
+  const destinationName = normalizeName(state.route?.destinationStationName || state.destination?.stationName || '');
+  return state.routeStations.some(stop => {
+    const idMatches = sameId(stop.stationId, destinationId);
+    const nameMatches = destinationName && normalizeName(stop.stationName) === destinationName;
+    return (idMatches || nameMatches) && routeStationSequence(stop) > originSeq;
+  });
 }
 
 function selectArrivalForRoute(items = []) {
@@ -392,29 +404,73 @@ function watchBestPosition(duration = 9000) {
 }
 
 
+function saveStoredPosition(position) {
+  const coords = position?.coords;
+  if (!coords || !Number.isFinite(number(coords.latitude, NaN)) || !Number.isFinite(number(coords.longitude, NaN))) return;
+  try {
+    localStorage.setItem('hogyeBusLastPosition', JSON.stringify({
+      latitude: number(coords.latitude),
+      longitude: number(coords.longitude),
+      accuracy: number(coords.accuracy, 0),
+      savedAt: Date.now()
+    }));
+  } catch {}
+}
+
+function readStoredPosition() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('hogyeBusLastPosition') || 'null');
+    if (!saved || Date.now() - number(saved.savedAt, 0) > STORED_LOCATION_MAX_AGE_MS) return null;
+    if (!Number.isFinite(number(saved.latitude, NaN)) || !Number.isFinite(number(saved.longitude, NaN))) return null;
+    return {
+      coords: {
+        latitude: number(saved.latitude),
+        longitude: number(saved.longitude),
+        accuracy: number(saved.accuracy, 300)
+      },
+      _fromStoredPosition: true
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function resolveUserPosition() {
   let quickPosition = null;
   let quickError = null;
   try {
     quickPosition = await getCurrentPosition({
       enableHighAccuracy: false,
-      timeout: 7000,
-      maximumAge: 120000
+      timeout: 8000,
+      maximumAge: 180000
     });
   } catch (error) {
     quickError = error;
   }
 
-  if (quickPosition && number(quickPosition.coords.accuracy, 9999) <= 70) return quickPosition;
+  if (quickPosition && number(quickPosition.coords.accuracy, 9999) <= 90) {
+    saveStoredPosition(quickPosition);
+    return quickPosition;
+  }
 
   try {
-    const precisePosition = await watchBestPosition(9000);
-    if (!quickPosition) return precisePosition;
-    return number(precisePosition.coords.accuracy, 9999) < number(quickPosition.coords.accuracy, 9999)
+    const precisePosition = await watchBestPosition(11000);
+    const selected = !quickPosition
       ? precisePosition
-      : quickPosition;
+      : number(precisePosition.coords.accuracy, 9999) < number(quickPosition.coords.accuracy, 9999)
+        ? precisePosition
+        : quickPosition;
+    saveStoredPosition(selected);
+    return selected;
   } catch (error) {
-    if (quickPosition) return quickPosition;
+    if (quickPosition) {
+      saveStoredPosition(quickPosition);
+      return quickPosition;
+    }
+    if (error?.code !== 1 && quickError?.code !== 1) {
+      const stored = readStoredPosition();
+      if (stored) return stored;
+    }
     throw error || quickError;
   }
 }
@@ -443,7 +499,7 @@ function normalizeNearbyStations(items, latitude, longitude) {
     if (!previous || number(normalized.distance, 999999) < number(previous.distance, 999999)) unique.set(key, normalized);
   });
   return [...unique.values()]
-    .filter(station => number(station.distance, 999999) <= 1100)
+    .filter(station => number(station.distance, 999999) <= NEARBY_RESULT_RADIUS_METERS)
     .sort((a, b) => number(a.distance, 999999) - number(b.distance, 999999));
 }
 
@@ -451,48 +507,58 @@ async function fetchNearbyStations(latitude, longitude, signal) {
   const queryPoint = async (lat, lng) => api('stationAround', {
     x: Number(lng).toFixed(7),
     y: Number(lat).toFixed(7)
-  }, { signal, fresh: true, timeout: 15000 });
+  }, { signal, fresh: true, timeout: 18000 });
 
-  // GBIS 주변 검색 반경 경계와 모바일 GPS 오차를 모두 보완하기 위해
-  // 현재 좌표와 약 320m 떨어진 동·서·남·북을 함께 조회한다.
-  const latOffset = 0.0029;
-  const lngOffset = 0.0036;
-  const primaryPoints = [
-    [latitude, longitude],
+  const collected = [];
+  const failures = [];
+  const runPoint = async ([lat, lng]) => {
+    try {
+      const result = await queryPoint(lat, lng);
+      collected.push(...(result.items || []));
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      failures.push(error);
+    }
+    return normalizeNearbyStations(collected, latitude, longitude);
+  };
+
+  // 공식 주변정류소 API는 요청 좌표 반경 500m를 반환한다. 먼저 실제 GPS 좌표 한 번만 조회한다.
+  let normalized = await runPoint([latitude, longitude]);
+  if (normalized.length >= 3) return normalized;
+
+  // GPS 오차 또는 500m 경계에 걸린 경우에만 주변 좌표를 낮은 동시성으로 보조 조회한다.
+  const latOffset = 0.0032;
+  const lngOffset = 0.0040;
+  const points = [
     [latitude + latOffset, longitude],
     [latitude - latOffset, longitude],
     [latitude, longitude + lngOffset],
-    [latitude, longitude - lngOffset]
+    [latitude, longitude - lngOffset],
+    [latitude + latOffset, longitude + lngOffset],
+    [latitude + latOffset, longitude - lngOffset],
+    [latitude - latOffset, longitude + lngOffset],
+    [latitude - latOffset, longitude - lngOffset]
   ];
-  const primary = await Promise.allSettled(primaryPoints.map(([lat, lng]) => queryPoint(lat, lng)));
-  let items = primary.flatMap(result => result.status === 'fulfilled' ? (result.value.items || []) : []);
-  let normalized = normalizeNearbyStations(items, latitude, longitude);
 
-  if (normalized.length < 6) {
-    const diagonals = await Promise.allSettled([
-      queryPoint(latitude + latOffset, longitude + lngOffset),
-      queryPoint(latitude + latOffset, longitude - lngOffset),
-      queryPoint(latitude - latOffset, longitude + lngOffset),
-      queryPoint(latitude - latOffset, longitude - lngOffset)
-    ]);
-    items = items.concat(diagonals.flatMap(result => result.status === 'fulfilled' ? (result.value.items || []) : []));
-    normalized = normalizeNearbyStations(items, latitude, longitude);
-  }
-
-  const firstFailure = [...primary].find(result => result.status === 'rejected');
-  if (!normalized.length && firstFailure) throw firstFailure.reason;
+  await mapWithConcurrency(points, 2, runPoint);
+  normalized = normalizeNearbyStations(collected, latitude, longitude);
+  if (!normalized.length && failures.length) throw failures[0];
   return normalized;
 }
 
 async function findNearbyOriginStations() {
   if (!window.isSecureContext) return toast('현재 위치는 HTTPS 주소에서만 사용할 수 있습니다.', 4000);
   if (!navigator.geolocation) return toast('이 브라우저는 현재 위치 기능을 지원하지 않습니다.', 4000);
+
+  state.nearbyAbortController?.abort();
+  const controller = new AbortController();
+  state.nearbyAbortController = controller;
   const requestId = ++state.nearbyRequestId;
   const listEl = els.originSuggestions;
   const button = els.nearbyOrigin;
   button.disabled = true;
   button.classList.add('loading');
-  if (els.nearbyStatus) els.nearbyStatus.textContent = 'GPS 위치를 확인하고 있습니다…';
+  if (els.nearbyStatus) els.nearbyStatus.textContent = 'GPS 위치 권한과 현재 좌표를 확인하고 있습니다…';
   listEl.innerHTML = '<div class="empty">현재 위치를 확인하는 중…</div>';
 
   try {
@@ -500,29 +566,36 @@ async function findNearbyOriginStations() {
     if (requestId !== state.nearbyRequestId) return;
     const { latitude, longitude, accuracy } = position.coords;
     state.userLocation = { lat: latitude, lng: longitude, accuracy: number(accuracy, 0) };
-    if (els.nearbyStatus) els.nearbyStatus.textContent = `위치 확인 완료 · 정확도 약 ${Math.round(number(accuracy, 0))}m · 주변 검색 중…`;
+    const sourceText = position._fromStoredPosition ? '최근 확인 위치' : '현재 위치';
+    if (els.nearbyStatus) {
+      els.nearbyStatus.textContent = `${sourceText} 확인 · 정확도 약 ${Math.round(number(accuracy, 0))}m · 주변 정류장 조회 중…`;
+    }
     if (state.map) renderMap(false);
 
-    listEl.innerHTML = '<div class="empty">현재 좌표 주변 정류장을 넓게 찾는 중…</div>';
-    const nearby = (await fetchNearbyStations(latitude, longitude)).slice(0, 24);
+    listEl.innerHTML = '<div class="empty">가까운 정류장을 거리순으로 찾는 중…</div>';
+    const nearby = (await fetchNearbyStations(latitude, longitude, controller.signal)).slice(0, 30);
     if (requestId !== state.nearbyRequestId) return;
     renderStationSuggestions('origin', nearby, { nearby: true });
 
     if (nearby.length) {
-      if (els.nearbyStatus) els.nearbyStatus.textContent = `현재 위치 기준 ${nearby.length}개 정류장 · 가까운 순서`;
+      updateApiState();
+      if (els.nearbyStatus) {
+        els.nearbyStatus.textContent = `${sourceText} 기준 ${nearby.length}개 · 가까운 순서 · 위치 정확도 약 ${Math.round(number(accuracy, 0))}m`;
+      }
       toast(`현재 위치 주변에서 ${nearby.length}개 정류장을 찾았습니다.`);
     } else {
-      if (els.nearbyStatus) els.nearbyStatus.textContent = '1.1km 안에서 조회되는 경기버스 정류장이 없습니다.';
-      listEl.innerHTML = '<div class="empty">현재 위치 1.1km 안에 조회되는 경기버스 정류장이 없습니다. 위치 권한의 “정확한 위치”를 켜거나 정류장 이름 검색을 이용해 주세요.</div>';
+      if (els.nearbyStatus) els.nearbyStatus.textContent = '주변정류소 API에서 결과가 없습니다. 정확한 위치를 켜고 다시 눌러 주세요.';
+      listEl.innerHTML = '<div class="empty">현재 좌표 주변에서 경기버스 정류소가 조회되지 않았습니다. iPad·iPhone 설정에서 브라우저의 “정확한 위치”를 켠 뒤 다시 시도해 주세요.</div>';
     }
   } catch (error) {
-    if (requestId !== state.nearbyRequestId) return;
+    if (requestId !== state.nearbyRequestId || error?.name === 'AbortError') return;
     const message = geolocationMessage(error);
     if (els.nearbyStatus) els.nearbyStatus.textContent = message;
     listEl.innerHTML = `<div class="empty error">${esc(message)}</div>`;
     if (error?.code && ![1, 2, 3].includes(error.code)) updateApiState(error);
   } finally {
     if (requestId === state.nearbyRequestId) {
+      state.nearbyAbortController = null;
       button.disabled = false;
       button.classList.remove('loading');
     }
@@ -572,36 +645,64 @@ function buildDirectRouteCandidate(originRoute, routeStations) {
   if (!ordered.length) return null;
 
   let originStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.origin));
-  let destinationStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.destination));
+  let exactDestinationStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.destination));
 
-  // 드물게 정류소 조회와 노선 경유정류소 조회의 ID가 다르게 내려오는 경우만
-  // 동일 이름 + 25m 이내 좌표로 보조 매칭한다. 반대편 정류장은 포함하지 않는다.
+  // 드물게 정류소 조회와 경유정류소 조회의 ID가 다를 때만 같은 이름+근접 좌표로 보조 매칭한다.
   if (!originStops.length) {
     originStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.origin, { allowCoordinateFallback: true }));
   }
-  if (!destinationStops.length) {
-    destinationStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.destination, { allowCoordinateFallback: true }));
+  if (!exactDestinationStops.length) {
+    exactDestinationStops = ordered.filter(stop => routeStopMatchesSelection(stop, state.destination, { allowCoordinateFallback: true }));
   }
-  if (!originStops.length || !destinationStops.length) return null;
+  if (!originStops.length) return null;
 
   const expectedOriginOrders = (originRoute?._originOrders || [originRoute?.staOrder])
     .map(value => number(value, NaN))
     .filter(Number.isFinite);
-  const pairs = [];
-  originStops.forEach(originStop => destinationStops.forEach(destinationStop => {
+  const exactPairs = [];
+  const nearbyPairs = [];
+  const destinationCoordinate = stationCoordinate(state.destination);
+
+  originStops.forEach(originStop => {
     const originSeq = routeStationSequence(originStop);
-    const destinationSeq = routeStationSequence(destinationStop);
-    if (!Number.isFinite(originSeq) || !Number.isFinite(destinationSeq) || destinationSeq <= originSeq) return;
-    const stopCount = destinationSeq - originSeq;
+    if (!Number.isFinite(originSeq)) return;
     const orderPenalty = expectedOriginOrders.length
       ? Math.min(...expectedOriginOrders.map(order => Math.abs(originSeq - order))) * 100
       : 0;
-    pairs.push({ originStop, destinationStop, originSeq, destinationSeq, stopCount, score: orderPenalty + stopCount });
-  }));
-  if (!pairs.length) return null;
 
+    exactDestinationStops.forEach(destinationStop => {
+      const destinationSeq = routeStationSequence(destinationStop);
+      if (!Number.isFinite(destinationSeq) || destinationSeq <= originSeq) return;
+      const stopCount = destinationSeq - originSeq;
+      exactPairs.push({
+        originStop, destinationStop, originSeq, destinationSeq, stopCount,
+        walkDistance: 0, isNearby: false, score: orderPenalty + stopCount
+      });
+    });
+
+    if (!destinationCoordinate) return;
+    ordered.forEach(destinationStop => {
+      const destinationSeq = routeStationSequence(destinationStop);
+      if (!Number.isFinite(destinationSeq) || destinationSeq <= originSeq) return;
+      const pos = stationPosition(destinationStop);
+      if (!pos) return;
+      const walkDistance = distanceMeters(pos[0], pos[1], destinationCoordinate.lat, destinationCoordinate.lng);
+      if (walkDistance > DESTINATION_WALK_RADIUS_METERS) return;
+      const stopCount = destinationSeq - originSeq;
+      nearbyPairs.push({
+        originStop, destinationStop, originSeq, destinationSeq, stopCount,
+        walkDistance: Math.round(walkDistance), isNearby: true,
+        score: orderPenalty + walkDistance * 8 + stopCount
+      });
+    });
+  });
+
+  // 정확히 같은 정류장이 있으면 우선하고, 없을 때만 목적지 도보권 정류장을 사용한다.
+  const pairs = exactPairs.length ? exactPairs : nearbyPairs;
+  if (!pairs.length) return null;
   pairs.sort((a, b) => a.score - b.score);
   const best = pairs[0];
+
   return {
     originRoute: {
       ...originRoute,
@@ -614,7 +715,11 @@ function buildDirectRouteCandidate(originRoute, routeStations) {
     destRoute: {
       stationId: best.destinationStop.stationId,
       stationName: best.destinationStop.stationName,
-      staOrder: best.destinationSeq
+      staOrder: best.destinationSeq,
+      requestedStationId: state.destination.stationId,
+      requestedStationName: state.destination.stationName,
+      isNearby: best.isNearby,
+      walkDistance: best.walkDistance
     },
     routeStations: ordered,
     stopCount: best.stopCount
@@ -635,6 +740,20 @@ async function mapWithConcurrency(items, limit, worker) {
   });
   await Promise.all(runners);
   return results;
+}
+
+async function apiWithRetry(action, params, options = {}, attempts = 2) {
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      return await api(action, params, { ...options, fresh: attempt > 0 || options.fresh });
+    } catch (error) {
+      lastError = error;
+      if (error?.name === 'AbortError' || ['INVALID_SERVICE_KEY', 'API_ACCESS_DENIED', 'MISSING_SERVICE_KEY'].includes(error?.code)) throw error;
+      if (attempt + 1 < attempts) await new Promise(resolve => setTimeout(resolve, 280 + attempt * 320));
+    }
+  }
+  throw lastError;
 }
 
 async function findRoutes() {
@@ -681,12 +800,12 @@ async function findRoutes() {
 
     let completed = 0;
     let failed = 0;
-    const candidates = await mapWithConcurrency(uniqueRoutes, 4, async originRoute => {
+    const candidates = await mapWithConcurrency(uniqueRoutes, 3, async originRoute => {
       try {
-        const stationData = await api('routeStations', { routeId: originRoute.routeId }, {
+        const stationData = await apiWithRetry('routeStations', { routeId: originRoute.routeId }, {
           signal: controller.signal,
           timeout: 22000
-        });
+        }, 2);
         return buildDirectRouteCandidate(originRoute, stationData.items || []);
       } catch (error) {
         if (error?.name === 'AbortError') throw error;
@@ -717,9 +836,12 @@ async function findRoutes() {
 
     els.routeResults.innerHTML = `<div class="route-result-summary">출발 정류장 운행 노선 ${uniqueRoutes.length}개를 확인해 직행 ${directRoutes.length}개를 찾았습니다.</div>${directRoutes.map((pair, index) => {
       const stops = number(pair.stopCount, number(pair.destRoute.staOrder) - number(pair.originRoute.staOrder));
+      const nearbyNote = pair.destRoute.isNearby
+        ? ` · ${esc(pair.destRoute.stationName)} 하차 · 도보 약 ${Math.max(10, Math.round(number(pair.destRoute.walkDistance, 0) / 10) * 10)}m`
+        : '';
       return `<button class="route-option" data-index="${index}">
         <span class="route-number">${esc(pair.originRoute.routeName)}</span>
-        <span><strong>${esc(pair.originRoute.routeDestName || '진행 방향')}</strong><small>${stops}개 정류장 이동 · ${esc(pair.originRoute.routeTypeName || '경기버스')}</small></span>
+        <span><strong>${esc(pair.originRoute.routeDestName || '진행 방향')}</strong><small>${stops}개 정류장 이동 · ${esc(pair.originRoute.routeTypeName || '경기버스')}${nearbyNote}</small></span>
         <span class="route-arrow">›</span>
       </button>`;
     }).join('')}`;
@@ -768,11 +890,18 @@ async function chooseRoute(pair) {
     routeDestName: pair.originRoute.routeDestName,
     routeDestId: pair.originRoute.routeDestId || '',
     originStaOrder: number(pair.originRoute.staOrder),
-    destinationStaOrder: number(pair.destRoute.staOrder)
+    destinationStaOrder: number(pair.destRoute.staOrder),
+    destinationStationId: String(pair.destRoute.stationId || ''),
+    destinationStationName: pair.destRoute.stationName || state.destination.stationName,
+    destinationNearby: Boolean(pair.destRoute.isNearby),
+    destinationWalkDistance: number(pair.destRoute.walkDistance, 0)
   };
   els.liveSection.classList.remove('hidden');
   els.alertSection.classList.remove('hidden');
-  els.chosenRoute.innerHTML = `<div class="chosen-route-main"><span class="chosen-route-number">${esc(state.route.routeName)}</span><span><strong>${esc(state.route.routeDestName || '선택 노선')} 방면</strong><p>${esc(state.origin.stationName)} → ${esc(state.destination.stationName)}</p></span></div><small class="chosen-route-hint">실제 노선 전체와 운행 차량을 먼저 표시하고, 공식 도착정보가 없으면 다음 회차에 가까운 차량도 따로 안내합니다.</small>`;
+  const destinationGuide = state.route.destinationNearby
+    ? `${esc(state.destination.stationName)} 인근 · ${esc(state.route.destinationStationName)} 하차 후 도보 약 ${Math.max(10, Math.round(state.route.destinationWalkDistance / 10) * 10)}m`
+    : esc(state.destination.stationName);
+  els.chosenRoute.innerHTML = `<div class="chosen-route-main"><span class="chosen-route-number">${esc(state.route.routeName)}</span><span><strong>${esc(state.route.routeDestName || '선택 노선')} 방면</strong><p>${esc(state.origin.stationName)} → ${destinationGuide}</p></span></div><small class="chosen-route-hint">실제 노선 전체와 운행 차량을 표시합니다. 목적지와 같은 정류장이 없으면 도보 800m 이내의 가장 가까운 하차 정류장도 함께 찾습니다.</small>`;
   if (els.liveVehicles) els.liveVehicles.innerHTML = '<div class="empty">노선과 운행 차량을 불러오는 중…</div>';
   els.liveSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
   await loadLive(true, { manual: true });
@@ -1645,7 +1774,7 @@ async function initFirebase() {
   try {
     const configResponse = await fetch('/api/config', { cache: 'no-store' });
     state.firebaseConfig = await configResponse.json();
-    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.8.0', { scope: '/' });
+    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.9.0', { scope: '/' });
 
     if (!state.firebaseConfig.backgroundPushConfigured) {
       els.pushState.textContent = '화면 켤 때만';
@@ -1757,8 +1886,8 @@ function buildAlertPayload(fcmToken) {
     turnRouteIndex: topology.turnIndex,
     loopCapable: topology.loopCapable,
     originAtStart: topology.originAtStart,
-    destinationStationId: String(state.destination?.stationId || ''),
-    destinationStationName: String(state.destination?.stationName || ''),
+    destinationStationId: String(state.route?.destinationStationId || state.destination?.stationId || ''),
+    destinationStationName: String(state.route?.destinationStationName || state.destination?.stationName || ''),
     leadStops: number($('leadStops').value, 3),
     startTime: $('startTime').value,
     endTime: $('endTime').value,
