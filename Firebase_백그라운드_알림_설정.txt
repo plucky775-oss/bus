@@ -1,0 +1,17 @@
+Firebase 백그라운드 버스 알림 필수 설정
+
+현재 화면에 나온 auth/configuration-not-found 오류는 Firebase 익명 로그인이 꺼져 있다는 뜻입니다.
+
+1. Firebase 콘솔에서 bus 프로젝트를 엽니다.
+2. 왼쪽 메뉴에서 빌드(Build) → Authentication을 엽니다.
+3. 시작하기를 누른 뒤 로그인 방법(Sign-in method)을 엽니다.
+4. 익명(Anonymous)을 선택합니다.
+5. 사용 설정을 켜고 저장합니다.
+6. Firestore Database가 없다면 데이터베이스 만들기를 진행합니다.
+7. 프로젝트의 firestore.rules와 functions 폴더를 Firebase에 배포합니다.
+8. 앱을 다시 열어 알림 허용하고 저장을 누릅니다.
+
+참고
+- 이번 v1.5에서는 익명 로그인이 꺼져 있어도 실시간 지도와 앱을 열어둔 동안의 로컬 알림은 계속 동작합니다.
+- 화면이 꺼진 상태에서도 1분 간격으로 버스를 감시하려면 functions/watchBusAlerts가 배포되어야 합니다.
+- 예약 함수는 Cloud Scheduler를 사용하므로 Firebase 결제 설정이 필요할 수 있습니다.

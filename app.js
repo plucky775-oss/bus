@@ -9,6 +9,7 @@ const state = {
   destination: null,
   route: null,
   routeStations: [],
+  routeShape: [],
   locations: [],
   arrival: null,
   map: null,
@@ -16,13 +17,15 @@ const state = {
   markerLayer: null,
   userLocation: null,
   mapScope: 'full',
-  vehicleScope: 'approaching',
+  vehicleScope: 'all',
   poller: null,
   firebase: null,
   firebaseConfig: null,
   swRegistration: null,
   foregroundAlarmKey: '',
-  lastAlertAt: 0
+  lastAlertAt: 0,
+  liveLoading: false,
+  firebaseAuthError: null
 };
 
 const els = {
@@ -32,7 +35,8 @@ const els = {
   routeResults: $('routeResults'), liveSection: $('liveSection'), alertSection: $('alertSection'),
   chosenRoute: $('chosenRoute'), arrivalGrid: $('arrivalGrid'), pushState: $('pushState'),
   busCount: $('busCount'), mapNote: $('mapNote'), nearbyOrigin: $('nearbyOrigin'),
-  toast: $('toast'), alarmAudio: $('alarmAudio'), alertInfo: $('alertInfo')
+  toast: $('toast'), alarmAudio: $('alarmAudio'), alertInfo: $('alertInfo'),
+  refreshLive: $('refreshLive'), refreshLiveLabel: $('refreshLiveLabel')
 };
 
 function toast(message, ms = 2600) {
@@ -50,6 +54,89 @@ function number(value, fallback = 0) {
   if (value === null || value === undefined || String(value).trim() === '') return fallback;
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function sameId(a, b) {
+  return String(a ?? '').trim() !== '' && String(a ?? '').trim() === String(b ?? '').trim();
+}
+
+function routeStationSequence(item) {
+  return number(item?.stationSeq ?? item?.staOrder ?? item?.stationOrder, NaN);
+}
+
+function normalizeRouteStation(item) {
+  return {
+    ...item,
+    stationId: String(item?.stationId ?? item?.stationID ?? '').trim(),
+    stationSeq: routeStationSequence(item),
+    stationName: item?.stationName || item?.stationNm || '',
+    x: item?.x ?? item?.gpsX ?? item?.longitude,
+    y: item?.y ?? item?.gpsY ?? item?.latitude
+  };
+}
+
+function normalizeRouteShapePoint(item) {
+  return {
+    ...item,
+    lineSeq: number(item?.lineSeq ?? item?.seq ?? item?.shapeSeq, NaN),
+    x: item?.x ?? item?.gpsX ?? item?.longitude,
+    y: item?.y ?? item?.gpsY ?? item?.latitude
+  };
+}
+
+function normalizeBusLocation(item) {
+  const stationId = String(item?.stationId ?? item?.stationID ?? '').trim();
+  let stationSeq = number(item?.stationSeq ?? item?.staOrder ?? item?.stationOrder, NaN);
+  if (!Number.isFinite(stationSeq) && stationId) {
+    const matched = state.routeStations.find(stop => sameId(stop.stationId, stationId));
+    stationSeq = routeStationSequence(matched);
+  }
+  return {
+    ...item,
+    stationId,
+    stationSeq,
+    vehId: String(item?.vehId ?? item?.vehicleId ?? '').trim(),
+    plateNo: item?.plateNo || item?.plateNumber || '',
+    stateCd: item?.stateCd ?? item?.stateCode
+  };
+}
+
+function reconcileRouteOrders() {
+  const stations = state.routeStations || [];
+  if (!stations.length || !state.route || !state.origin || !state.destination) return;
+
+  const originMatches = stations.filter(stop => sameId(stop.stationId, state.origin.stationId));
+  const destinationMatches = stations.filter(stop => sameId(stop.stationId, state.destination.stationId));
+  const previousOrigin = number(state.route.originStaOrder, 0);
+  const previousDestination = number(state.route.destinationStaOrder, 0);
+  const pairs = [];
+
+  originMatches.forEach(originStop => destinationMatches.forEach(destinationStop => {
+    const originSeq = routeStationSequence(originStop);
+    const destinationSeq = routeStationSequence(destinationStop);
+    if (!Number.isFinite(originSeq) || !Number.isFinite(destinationSeq) || destinationSeq <= originSeq) return;
+    const score = Math.abs(originSeq - previousOrigin) + Math.abs(destinationSeq - previousDestination)
+      + Math.max(0, destinationSeq - originSeq) * .001;
+    pairs.push({ originSeq, destinationSeq, score });
+  }));
+
+  if (pairs.length) {
+    pairs.sort((a, b) => a.score - b.score);
+    state.route.originStaOrder = pairs[0].originSeq;
+    state.route.destinationStaOrder = pairs[0].destinationSeq;
+    return;
+  }
+
+  // 일부 순환·분기 노선은 동일 정류소가 중복되므로 이름까지 보조 비교한다.
+  const nameMatch = (station, selected) => String(station.stationName || '').replace(/\s/g, '')
+    === String(selected.stationName || '').replace(/\s/g, '');
+  const fallbackOrigin = stations.find(stop => nameMatch(stop, state.origin));
+  const fallbackDestination = stations.find(stop => nameMatch(stop, state.destination)
+    && routeStationSequence(stop) > routeStationSequence(fallbackOrigin));
+  if (fallbackOrigin && fallbackDestination) {
+    state.route.originStaOrder = routeStationSequence(fallbackOrigin);
+    state.route.destinationStaOrder = routeStationSequence(fallbackDestination);
+  }
 }
 
 async function api(action, params = {}) {
@@ -322,15 +409,16 @@ async function findRoutes() {
 
 async function chooseRoute(pair) {
   state.routeStations = [];
+  state.routeShape = [];
   state.locations = [];
   state.arrival = null;
   state.mapScope = 'full';
-  state.vehicleScope = 'approaching';
+  state.vehicleScope = 'all';
   document.querySelectorAll('[data-map-scope]').forEach(button => {
     button.classList.toggle('active', button.dataset.mapScope === 'full');
   });
   document.querySelectorAll('[data-vehicle-scope]').forEach(button => {
-    button.classList.toggle('active', button.dataset.vehicleScope === 'approaching');
+    button.classList.toggle('active', button.dataset.vehicleScope === 'all');
   });
   state.foregroundAlarmKey = '';
   state.route = {
@@ -343,17 +431,41 @@ async function chooseRoute(pair) {
   };
   els.liveSection.classList.remove('hidden');
   els.alertSection.classList.remove('hidden');
-  els.chosenRoute.innerHTML = `<strong>${esc(state.route.routeName)}번 · ${esc(state.route.routeDestName || '')} 방면</strong><p>${esc(state.origin.stationName)} → ${esc(state.destination.stationName)}</p>`;
+  els.chosenRoute.innerHTML = `<div class="chosen-route-main"><span class="chosen-route-number">${esc(state.route.routeName)}</span><span><strong>${esc(state.route.routeDestName || '선택 노선')} 방면</strong><p>${esc(state.origin.stationName)} → ${esc(state.destination.stationName)}</p></span></div><small class="chosen-route-hint">노선 전체와 현재 운행 중인 모든 차량을 지도에 표시합니다.</small>`;
   els.liveSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
   await loadLive(true);
   startPolling();
 }
 
-async function loadLive(fit = false) {
+async function loadLive(fit = false, { manual = false, silent = false } = {}) {
   if (!state.route || !state.origin) return;
+  if (state.liveLoading) {
+    if (manual) toast('실시간 정보를 갱신하고 있습니다.');
+    return;
+  }
+
+  state.liveLoading = true;
+  if (els.refreshLive) {
+    els.refreshLive.disabled = true;
+    els.refreshLive.classList.add('is-loading');
+  }
+  if (els.refreshLiveLabel) els.refreshLiveLabel.textContent = '갱신 중';
+
+  const errors = [];
   try {
-    const [stationsData, locationData, arrivalData] = await Promise.all([
-      state.routeStations.length ? Promise.resolve({ items: state.routeStations }) : api('routeStations', { routeId: state.route.routeId }),
+    if (!state.routeStations.length) {
+      const stationsData = await api('routeStations', { routeId: state.route.routeId });
+      state.routeStations = (stationsData.items || [])
+        .map(normalizeRouteStation)
+        .filter(stop => Number.isFinite(routeStationSequence(stop)))
+        .sort((a, b) => routeStationSequence(a) - routeStationSequence(b));
+    }
+
+    if (!state.routeStations.length) throw new Error('선택한 버스의 경유 정류소 정보를 찾지 못했습니다.');
+    reconcileRouteOrders();
+
+    const [shapeResult, locationResult, arrivalResult] = await Promise.allSettled([
+      state.routeShape.length ? Promise.resolve({ items: state.routeShape }) : api('routeLines', { routeId: state.route.routeId }),
       api('busLocations', { routeId: state.route.routeId }),
       api('arrival', {
         stationId: state.origin.stationId,
@@ -361,17 +473,65 @@ async function loadLive(fit = false) {
         staOrder: state.route.originStaOrder
       })
     ]);
-    state.routeStations = stationsData.items.sort((a, b) => number(a.stationSeq) - number(b.stationSeq));
-    state.locations = locationData.items;
-    state.arrival = arrivalData.item || {};
+
+    if (shapeResult.status === 'fulfilled') {
+      state.routeShape = (shapeResult.value.items || [])
+        .map(normalizeRouteShapePoint)
+        .filter(point => Number.isFinite(number(point.x, NaN)) && Number.isFinite(number(point.y, NaN)))
+        .sort((a, b) => number(a.lineSeq) - number(b.lineSeq));
+    }
+
+    if (locationResult.status === 'fulfilled') {
+      state.locations = (locationResult.value.items || [])
+        .map(normalizeBusLocation)
+        .filter(bus => Number.isFinite(number(bus.stationSeq, NaN)) || bus.stationId);
+    } else {
+      state.locations = [];
+      errors.push(locationResult.reason);
+    }
+
+    if (arrivalResult.status === 'fulfilled') {
+      state.arrival = arrivalResult.value.item || {};
+    } else {
+      state.arrival = {};
+      errors.push(arrivalResult.reason);
+    }
+
     renderArrival();
-    renderMap(fit);
+    renderMap(fit || manual);
     checkForegroundAlarm();
-    els.apiState.textContent = '실시간 연결됨';
-    els.apiState.closest('.live-pill')?.classList.add('is-good');
+
+    if (locationResult.status === 'fulfilled') {
+      updateApiState();
+      els.apiState.textContent = '실시간 연결됨';
+      els.apiState.closest('.live-pill')?.classList.add('is-good');
+    } else if (errors[0]) {
+      updateApiState(errors[0]);
+    }
+
+    if (manual && !silent) {
+      const actualCount = state.locations.length;
+      const arrivalCount = [arrivalMetadata(1), arrivalMetadata(2)].filter(Boolean).length;
+      toast(actualCount
+        ? `실시간 버스 ${actualCount}대와 노선을 새로 불러왔습니다.`
+        : arrivalCount
+          ? '위치 API 차량은 없지만 도착 예정 버스를 지도에 표시했습니다.'
+          : '현재 운행 차량 정보가 없습니다. 노선은 정상적으로 표시했습니다.', 3800);
+    }
   } catch (error) {
     updateApiState(error);
-    toast(error.message);
+    if (!silent) toast(error.message, 4200);
+    if (state.routeStations.length) {
+      renderArrival();
+      renderMap(fit || manual);
+    }
+  } finally {
+    state.liveLoading = false;
+    if (els.refreshLive) {
+      els.refreshLive.disabled = false;
+      els.refreshLive.classList.remove('is-loading');
+    }
+    if (els.refreshLiveLabel) els.refreshLiveLabel.textContent = '새로고침';
   }
 }
 
@@ -401,17 +561,35 @@ function renderArrival() {
 }
 
 function interpolateBusPosition(location) {
-  const seq = number(location.stationSeq);
-  const current = state.routeStations.find(s => number(s.stationSeq) === seq);
-  const next = state.routeStations.find(s => number(s.stationSeq) === seq + 1);
-  if (!current) return null;
-  const y1 = number(current.y, NaN), x1 = number(current.x, NaN);
-  if (!Number.isFinite(y1) || !Number.isFinite(x1)) return null;
-  if (location._synthetic || !next) return [y1, x1];
-  const y2 = number(next.y, y1), x2 = number(next.x, x1);
+  const directLat = number(location?.y ?? location?.gpsY ?? location?.latitude, NaN);
+  const directLng = number(location?.x ?? location?.gpsX ?? location?.longitude, NaN);
+  if (Number.isFinite(directLat) && Number.isFinite(directLng)) return [directLat, directLng];
+
+  const ordered = [...state.routeStations].sort((a, b) => routeStationSequence(a) - routeStationSequence(b));
+  const stationId = String(location?.stationId || '').trim();
+  const seq = number(location?.stationSeq, NaN);
+  let currentIndex = stationId ? ordered.findIndex(stop => sameId(stop.stationId, stationId)) : -1;
+  if (currentIndex < 0 && Number.isFinite(seq)) currentIndex = ordered.findIndex(stop => routeStationSequence(stop) === seq);
+  if (currentIndex < 0 && Number.isFinite(seq)) {
+    currentIndex = ordered.reduce((best, stop, index) => {
+      const distance = Math.abs(routeStationSequence(stop) - seq);
+      return distance < best.distance ? { index, distance } : best;
+    }, { index: -1, distance: Infinity }).index;
+  }
+  if (currentIndex < 0) return null;
+
+  const current = ordered[currentIndex];
+  const next = ordered[currentIndex + 1];
+  const currentPos = stationPosition(current);
+  if (!currentPos) return null;
+  if (location._synthetic || !next) return currentPos;
+  const nextPos = stationPosition(next) || currentPos;
   const stateCode = number(location.stateCd, -1);
-  const ratio = stateCode === 0 ? .55 : stateCode === 2 ? .25 : 0;
-  return [y1 + (y2 - y1) * ratio, x1 + (x2 - x1) * ratio];
+  const ratio = stateCode === 0 ? .58 : stateCode === 2 ? .28 : .08;
+  return [
+    currentPos[0] + (nextPos[0] - currentPos[0]) * ratio,
+    currentPos[1] + (nextPos[1] - currentPos[1]) * ratio
+  ];
 }
 
 function stationPosition(stop) {
@@ -465,11 +643,15 @@ function syntheticArrivalBus(metadata) {
 function busCollections() {
   const actual = (state.locations || []).map(bus => ({ ...bus, vehId: idText(bus.vehId) }));
   const actualByVehicle = new Map(actual.filter(bus => bus.vehId).map(bus => [bus.vehId, bus]));
+  const actualByPlate = new Map(actual.filter(bus => bus.plateNo).map(bus => [String(bus.plateNo), bus]));
   const matchedIds = new Set();
+  const matchedPlates = new Set();
   const exactArrivals = [1, 2].map(arrivalMetadata).filter(Boolean).map(metadata => {
-    const match = metadata.vehId ? actualByVehicle.get(metadata.vehId) : null;
+    const match = (metadata.vehId ? actualByVehicle.get(metadata.vehId) : null)
+      || (metadata.plateNo ? actualByPlate.get(String(metadata.plateNo)) : null);
     if (match) {
-      matchedIds.add(metadata.vehId);
+      if (metadata.vehId) matchedIds.add(metadata.vehId);
+      if (metadata.plateNo) matchedPlates.add(String(metadata.plateNo));
       return mergeArrivalBus(match, metadata);
     }
     return syntheticArrivalBus(metadata);
@@ -478,7 +660,8 @@ function busCollections() {
   const originOrder = number(state.route?.originStaOrder, 0);
   const otherApproaching = actual.filter(bus => {
     if (bus.vehId && matchedIds.has(bus.vehId)) return false;
-    return number(bus.stationSeq, 999999) < originOrder;
+    if (bus.plateNo && matchedPlates.has(String(bus.plateNo))) return false;
+    return number(bus.stationSeq, 999999) <= originOrder;
   });
 
   const approaching = [...exactArrivals, ...otherApproaching]
@@ -530,11 +713,12 @@ function busMapStatus(bus) {
       label: `${arrivalLabel} · ${distanceLabel}`
     };
   }
-  if (seq < state.route.originStaOrder) {
+  if (seq <= state.route.originStaOrder) {
     const remaining = Math.max(0, state.route.originStaOrder - seq);
-    return { className: 'approach', label: `탑승 정류장까지 약 ${remaining}정거장` };
+    return { className: 'approach', label: remaining ? `탑승 정류장까지 약 ${remaining}정거장` : '탑승 정류장 도착 중' };
   }
-  return { className: 'after', label: '탑승 정류장을 이미 지난 차량' };
+  if (seq <= state.route.destinationStaOrder) return { className: 'journey', label: '탑승 정류장을 지나 목적지 방향으로 운행 중' };
+  return { className: 'after', label: '목적지 이후 구간 운행 중' };
 }
 
 function drawPolyline(stops, options) {
@@ -549,7 +733,17 @@ function renderMap(fit = false) {
   state.markerLayer.clearLayers();
 
   const ordered = [...state.routeStations].sort((a, b) => number(a.stationSeq) - number(b.stationSeq));
-  const allLatlngs = drawPolyline(ordered, { color: '#8fa7c0', weight: 4, opacity: .42 });
+  const routeShapeLatlngs = (state.routeShape || []).map(point => {
+    const lat = number(point.y, NaN);
+    const lng = number(point.x, NaN);
+    return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null;
+  }).filter(Boolean);
+  if (routeShapeLatlngs.length > 1) {
+    L.polyline(routeShapeLatlngs, { color: '#062d66', weight: 9, opacity: .82, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+    L.polyline(routeShapeLatlngs, { color: '#36b9ff', weight: 4, opacity: .82, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+  }
+  const stationRouteLatlngs = drawPolyline(ordered, { color: '#123f78', weight: routeShapeLatlngs.length ? 3 : 7, opacity: routeShapeLatlngs.length ? .24 : .78, lineCap: 'round', lineJoin: 'round' });
+  const allLatlngs = routeShapeLatlngs.length ? routeShapeLatlngs : stationRouteLatlngs;
   const approachStops = ordered.filter(stop => number(stop.stationSeq) <= state.route.originStaOrder);
   const journeyStops = ordered.filter(stop => {
     const seq = number(stop.stationSeq);
@@ -557,9 +751,19 @@ function renderMap(fit = false) {
   });
   const afterStops = ordered.filter(stop => number(stop.stationSeq) >= state.route.destinationStaOrder);
 
-  const approachLatlngs = drawPolyline(approachStops, { color: '#23b9ee', weight: 5, opacity: .9, dashArray: '8 8' });
-  const journeyLatlngs = drawPolyline(journeyStops, { color: '#1859d9', weight: 6, opacity: .92 });
+  const approachLatlngs = drawPolyline(approachStops, { color: '#24c8f2', weight: 6, opacity: .96, dashArray: '10 8', lineCap: 'round' });
+  const journeyLatlngs = drawPolyline(journeyStops, { color: '#1975ff', weight: 8, opacity: .98, lineCap: 'round', lineJoin: 'round' });
   drawPolyline(afterStops, { color: '#8b98aa', weight: 4, opacity: .32, dashArray: '4 9' });
+
+  if (allLatlngs.length) {
+    const badgePos = allLatlngs[Math.floor(allLatlngs.length / 2)];
+    const routeBadge = L.divIcon({
+      className: '',
+      html: `<div class="route-map-badge"><span>${esc(state.route.routeName)}</span><small>${esc(state.route.routeDestName || '선택 노선')}</small></div>`,
+      iconSize: [104, 38], iconAnchor: [52, 19]
+    });
+    L.marker(badgePos, { icon: routeBadge, interactive: false, zIndexOffset: 700 }).addTo(state.routeLayer);
+  }
 
   ordered.forEach(stop => {
     const pos = stationPosition(stop);
@@ -579,7 +783,7 @@ function renderMap(fit = false) {
   });
 
   const collections = busCollections();
-  const visibleBuses = state.vehicleScope === 'all' ? collections.all : collections.approaching;
+  const visibleBuses = state.vehicleScope === 'approaching' ? collections.approaching : collections.all;
   const visibleBusPositions = [];
 
   visibleBuses.forEach(bus => {
@@ -590,9 +794,9 @@ function renderMap(fit = false) {
     const status = busMapStatus(bus);
     const icon = L.divIcon({
       className: '',
-      html: `<div class="bus-marker ${status.className}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17h12M7 4h10a3 3 0 0 1 3 3v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3Zm-1 9h12M8 8h8M7 21v-3m10 3v-3"/></svg></div>`,
-      iconSize: bus._arrivalRank ? [46, 46] : [40, 40],
-      iconAnchor: bus._arrivalRank ? [23, 23] : [20, 20]
+      html: `<div class="bus-marker ${status.className}"><span class="bus-route-number">${esc(state.route.routeName)}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17h12M7 4h10a3 3 0 0 1 3 3v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3Zm-1 9h12M8 8h8M7 21v-3m10 3v-3"/></svg><small>${esc(String(bus.plateNo || '').slice(-4))}</small></div>`,
+      iconSize: bus._arrivalRank ? [68, 52] : [62, 48],
+      iconAnchor: bus._arrivalRank ? [34, 26] : [31, 24]
     });
     const vehicleLabel = bus.plateNo || (bus.vehId ? `차량 ${bus.vehId}` : '차량정보 확인 중');
     const sourceLabel = bus._synthetic ? '<br><small>도착정보 기준 추정 위치</small>' : '';
@@ -619,13 +823,15 @@ function renderMap(fit = false) {
 
   const approachingCount = collections.approaching.length;
   const allCount = collections.all.length;
-  els.busCount.textContent = `${approachingCount}대 접근 중 · 전체 ${allCount}대`;
+  els.busCount.textContent = `전체 ${allCount}대 · 접근 ${approachingCount}대`;
   if (state.vehicleScope === 'approaching') {
     els.mapNote.textContent = approachingCount
       ? '탑승 정류장으로 오는 차량만 표시합니다. 1·2 표시 차량은 도착정보 API가 지정한 실제 첫 번째·두 번째 도착 버스입니다.'
       : '현재 탑승 정류장으로 접근 중인 차량이 없습니다. “전체 차량”을 누르면 이미 지나간 차량도 확인할 수 있습니다.';
   } else {
-    els.mapNote.textContent = '전체 운행 차량을 표시합니다. 회색 차량은 탑승 정류장을 이미 지난 차량이고, 파란색 차량은 탑승 정류장으로 접근 중입니다.';
+    els.mapNote.textContent = allCount
+      ? '선택한 노선 전체와 운행 중인 모든 차량을 표시합니다. 각 차량 위에 버스 번호가 함께 표시됩니다.'
+      : '선택한 노선은 표시됐지만 현재 위치 API에 운행 차량이 없습니다. 잠시 후 새로고침해 주세요.';
   }
 
   if (fit) {
@@ -704,7 +910,7 @@ function checkForegroundAlarm() {
 function startPolling() {
   clearInterval(state.poller);
   state.poller = setInterval(() => {
-    if (!document.hidden) loadLive(false);
+    if (!document.hidden) loadLive(false, { silent: true });
   }, 30000);
 }
 
@@ -712,19 +918,19 @@ async function initFirebase() {
   try {
     const configResponse = await fetch('/api/config', { cache: 'no-store' });
     state.firebaseConfig = await configResponse.json();
-    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw', { scope: '/' });
+    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.5.0', { scope: '/' });
 
     if (!state.firebaseConfig.backgroundPushConfigured) {
       els.pushState.textContent = '화면 켤 때만';
-      els.alertInfo.textContent = 'Firebase 환경변수가 없어 현재는 앱을 열어둔 동안의 알림만 동작합니다. README의 Firebase 설정을 완료하면 백그라운드 푸시가 활성화됩니다.';
+      els.alertInfo.textContent = 'Firebase 환경변수가 없어 현재는 앱을 열어둔 동안의 알림만 동작합니다.';
       return;
     }
 
     const app = initializeApp(state.firebaseConfig.firebase);
     const auth = getAuth(app);
-    const credential = await signInAnonymously(auth);
     const firestore = getFirestore(app);
-    state.firebase = { app, auth, user: credential.user, firestore, messaging: null };
+    state.firebase = { app, auth, user: null, firestore, messaging: null };
+
     if (await isSupported()) {
       state.firebase.messaging = getMessaging(app);
       onMessage(state.firebase.messaging, payload => {
@@ -736,12 +942,27 @@ async function initFirebase() {
         toast(`${title} · ${body}`, 5000);
       });
     }
-    els.pushState.textContent = '푸시 준비됨';
-    els.pushState.classList.add('good');
+
+    try {
+      const credential = await signInAnonymously(auth);
+      state.firebase.user = credential.user;
+      state.firebaseAuthError = null;
+      els.pushState.textContent = state.firebase.messaging ? '푸시 준비됨' : '로컬 알림';
+      els.pushState.classList.toggle('good', Boolean(state.firebase.messaging));
+    } catch (authError) {
+      state.firebaseAuthError = authError;
+      console.warn('Firebase anonymous auth unavailable', authError);
+      els.pushState.textContent = '설정 1단계 필요';
+      els.pushState.classList.remove('good');
+      const configurationMissing = String(authError?.code || '').includes('configuration-not-found');
+      els.alertInfo.textContent = configurationMissing
+        ? 'Firebase 콘솔에서 Authentication → 로그인 방법 → 익명(Anonymous)을 사용 설정하면 백그라운드 알림 저장이 활성화됩니다. 현재는 앱을 열어둔 동안 알림이 동작합니다.'
+        : `Firebase 익명 로그인 실패: ${authError.message}. 현재는 앱을 열어둔 동안 알림이 동작합니다.`;
+    }
   } catch (error) {
     console.warn('Firebase init failed', error);
     els.pushState.textContent = '로컬 알림';
-    els.alertInfo.textContent = `백그라운드 푸시 초기화 실패: ${error.message}. 앱을 열어둔 동안의 알림은 사용할 수 있습니다.`;
+    els.alertInfo.textContent = `푸시 초기화 실패: ${error.message}. 앱을 열어둔 동안의 알림은 계속 사용할 수 있습니다.`;
   }
 }
 
@@ -754,10 +975,14 @@ async function saveAlert() {
       if (permission !== 'granted') throw new Error('알림 권한이 허용되지 않았습니다.');
     }
 
-    if (!state.firebase?.firestore || !state.firebase?.messaging) {
-      localStorage.setItem('hogyeBusAlert', JSON.stringify(buildAlertPayload('')));
-      els.pushState.textContent = '화면 켤 때만';
-      toast('로컬 알림 설정을 저장했습니다.');
+    if (!state.firebase?.firestore || !state.firebase?.messaging || !state.firebase?.user) {
+      const localPayload = buildAlertPayload('');
+      localStorage.setItem('hogyeBusAlert', JSON.stringify(localPayload));
+      els.pushState.textContent = state.firebaseAuthError ? '설정 1단계 필요' : '화면 켤 때만';
+      els.alertInfo.textContent = state.firebaseAuthError
+        ? '로컬 알림은 저장했습니다. 화면이 꺼져도 받으려면 Firebase Authentication에서 익명 로그인을 사용 설정한 뒤 다시 저장해 주세요.'
+        : '로컬 알림을 저장했습니다. 앱을 열어둔 동안 30초마다 버스 도착을 확인합니다.';
+      toast(state.firebaseAuthError ? '로컬 알림 저장 완료 · Firebase 익명 로그인 설정이 필요합니다.' : '로컬 알림 설정을 저장했습니다.', 4500);
       return;
     }
 
@@ -811,7 +1036,7 @@ function setupEvents() {
   els.nearbyOrigin.addEventListener('click', findNearbyOriginStations);
   $('destinationSearch').addEventListener('click', () => searchStations('destination'));
   $('findRoutes').addEventListener('click', findRoutes);
-  $('refreshLive').addEventListener('click', () => loadLive(false));
+  $('refreshLive').addEventListener('click', () => loadLive(true, { manual: true }));
   $('saveAlert').addEventListener('click', saveAlert);
   $('testAlert').addEventListener('click', () => { playAlarm(); toast('알림 소리를 재생했습니다.'); });
   document.querySelectorAll('[data-map-scope]').forEach(button => button.addEventListener('click', () => {
@@ -850,7 +1075,8 @@ function setupEvents() {
   [els.originInput, els.destinationInput].forEach((input, index) => input.addEventListener('keydown', event => {
     if (event.key === 'Enter') searchStations(index === 0 ? 'origin' : 'destination');
   }));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && state.route) loadLive(false); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && state.route) loadLive(false, { silent: true }); });
+  window.addEventListener('pageshow', event => { if (event.persisted && state.route) loadLive(true, { manual: true }); });
 }
 
 async function boot() {

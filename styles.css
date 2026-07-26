@@ -443,3 +443,30 @@ input:focus, select:focus { border-color: #82b8fa; box-shadow: 0 0 0 4px rgba(25
 .live-pill.is-warn .pulse { background: #ffc75a; box-shadow: 0 0 0 5px rgba(255,199,90,.12), 0 0 14px rgba(255,199,90,.7); }
 .live-pill.is-error .pulse { background: #ff6e86; box-shadow: 0 0 0 5px rgba(255,110,134,.12), 0 0 14px rgba(255,110,134,.7); }
 .bus-marker svg { width: 21px; height: 21px; stroke-width: 1.9; }
+
+
+/* v1.5 실시간 노선·차량 표시 강화 */
+.secondary.compact.is-loading svg { animation: refreshSpin .8s linear infinite; }
+.secondary.compact:disabled { opacity: .72; cursor: wait; }
+@keyframes refreshSpin { to { transform: rotate(360deg); } }
+
+.chosen-route-main { position: relative; z-index: 1; display: flex; align-items: center; gap: 13px; }
+.chosen-route-number { min-width: 62px; padding: 9px 12px; color: #052554; font-size: 20px; font-weight: 950; text-align: center; border-radius: 13px; background: linear-gradient(145deg, #fff, #bdeeff); box-shadow: 0 9px 22px rgba(0, 25, 68, .22); }
+.chosen-route-hint { position: relative; z-index: 1; display: block; margin-top: 10px; color: rgba(226, 241, 255, .72); font-size: 10px; }
+
+.route-map-badge { display: flex; align-items: center; gap: 6px; width: max-content; max-width: 130px; padding: 6px 9px; color: #fff; border: 2px solid rgba(255,255,255,.95); border-radius: 12px; background: linear-gradient(145deg, #072e69, #1477ea); box-shadow: 0 8px 22px rgba(0, 45, 112, .34); white-space: nowrap; }
+.route-map-badge span { font-size: 13px; font-weight: 950; }
+.route-map-badge small { overflow: hidden; max-width: 75px; font-size: 8px; font-weight: 800; text-overflow: ellipsis; }
+
+.bus-marker { width: 62px; height: 48px; grid-template-columns: 1fr auto; grid-template-rows: 1fr auto; gap: 0 3px; padding: 5px 7px; border-radius: 15px; }
+.bus-marker.arrival-first, .bus-marker.arrival-second { width: 68px; height: 52px; border-radius: 16px; }
+.bus-marker svg { grid-column: 2; grid-row: 1 / span 2; width: 20px; height: 20px; }
+.bus-route-number { grid-column: 1; grid-row: 1; align-self: end; overflow: hidden; max-width: 35px; font-size: 12px; font-weight: 950; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+.bus-marker small { grid-column: 1; grid-row: 2; align-self: start; min-height: 9px; color: rgba(255,255,255,.82); font-size: 7px; font-weight: 800; line-height: 1.1; }
+.bus-marker.journey { background: linear-gradient(145deg, #6e5bea, #3879ee); box-shadow: 0 8px 22px rgba(65,65,185,.34); }
+.bus-marker.after { opacity: .72; }
+
+@media (max-width: 520px) {
+  .chosen-route-number { min-width: 54px; font-size: 17px; }
+  .route-map-badge { transform: scale(.9); }
+}
