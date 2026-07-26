@@ -63,8 +63,11 @@ async function api(action, params = {}) {
 }
 
 function updateApiState(error) {
+  const pill = els.apiState.closest('.live-pill');
+  pill?.classList.remove('is-good', 'is-warn', 'is-error');
   if (!error) {
     els.apiState.textContent = 'API 연결됨';
+    pill?.classList.add('is-good');
     return;
   }
   if (error.code === 'MISSING_SERVICE_KEY') els.apiState.textContent = 'API 키 필요';
@@ -72,6 +75,7 @@ function updateApiState(error) {
   else if (error.code === 'INVALID_SERVICE_KEY') els.apiState.textContent = 'API 키 확인';
   else if (error.code === 'API_QUOTA_EXCEEDED') els.apiState.textContent = '호출량 초과';
   else els.apiState.textContent = '연결 오류';
+  pill?.classList.add(error.code === 'API_QUOTA_EXCEEDED' ? 'is-warn' : 'is-error');
 }
 
 function stationLabel(station) {
@@ -212,6 +216,7 @@ async function loadLive(fit = false) {
     renderMap(fit);
     checkForegroundAlarm();
     els.apiState.textContent = '실시간 연결됨';
+    els.apiState.closest('.live-pill')?.classList.add('is-good');
   } catch (error) {
     updateApiState(error);
     toast(error.message);
@@ -283,7 +288,7 @@ function renderMap(fit = false) {
     if (seq < state.route.originStaOrder - 8 || seq > state.route.destinationStaOrder + 2) return;
     const pos = interpolateBusPosition(bus);
     if (!pos) return;
-    const icon = L.divIcon({ className: '', html: '<div class="bus-marker">🚌</div>', iconSize: [34,34], iconAnchor: [17,17] });
+    const icon = L.divIcon({ className: '', html: '<div class="bus-marker"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17h12M7 4h10a3 3 0 0 1 3 3v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3Zm-1 9h12M8 8h8M7 21v-3m10 3v-3"/></svg></div>', iconSize: [38,38], iconAnchor: [19,19] });
     L.marker(pos, { icon, zIndexOffset: 1000 })
       .bindPopup(`<strong>${esc(state.route.routeName)}번</strong><br>${esc(bus.plateNo || '')}<br>${number(bus.stationSeq)}번째 정류장 부근`)
       .addTo(state.markerLayer);

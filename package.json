@@ -1,6 +1,6 @@
 {
   "name": "hogye-bus-alert",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "description": "호계 e편한세상 출발 버스 실시간 위치 및 3정거장 전 알림 PWA",
   "scripts": {
