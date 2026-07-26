@@ -14,7 +14,7 @@
   <link rel="icon" type="image/png" href="/icons/favicon.png" />
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="/styles.css?v=2.7.0" />
+  <link rel="stylesheet" href="/styles.css?v=2.8.0" />
 </head>
 <body>
   <div class="app-shell">
@@ -40,8 +40,8 @@
 
         <div class="hero-message">
           <span class="route-label">호계 e편한세상 → 평촌</span>
-          <h2>내 버스가 가까워지면<br><em>먼저 알려드릴게요.</em></h2>
-          <p>실시간 위치를 확인하고 설정한 시간대에 3정거장 전 알림을 받으세요.</p>
+          <h2>버스 도착을<br><em>미리 알려드려요.</em></h2>
+          <p>노선·실시간 위치·도착 알림을 한 화면에서 확인하세요.</p>
         </div>
 
         <div class="hero-stats" aria-label="앱 주요 기능">
@@ -168,11 +168,11 @@
           <div class="map-live-chip"><span class="pulse"></span><span id="busCount">운행 차량 확인 중</span></div>
         </div>
         <div class="map-legend" aria-label="지도 범례">
-          <span><i class="legend-line approach"></i>탑승 전 접근 구간</span>
-          <span><i class="legend-line journey"></i>탑승 이동 구간</span>
+          <span><i class="legend-line approach"></i>내 정류장으로 오는 구간</span>
+          <span><i class="legend-line journey"></i>탑승 후 이동 구간</span>
           <span><i class="legend-bus"></i>운행 버스 · 노선번호/차량번호</span>
         </div>
-        <p class="map-note" id="mapNote">선택한 실제 노선 전체와 모든 운행 차량을 먼저 표시합니다. “오는 버스”에서는 공식 도착차량과 다음 회차 후보를 확인할 수 있습니다.</p>
+        <p class="map-note" id="mapNote">빨간선은 내 정류장으로 오는 구간, 노란선은 탑승 후 목적지까지 이동할 구간입니다.</p>
       </section>
 
       <section class="card alert-card hidden" id="alertSection">
@@ -301,6 +301,6 @@
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 
-  <script type="module" src="/app.js?v=2.7.0"></script>
+  <script type="module" src="/app.js?v=2.8.0"></script>
 </body>
 </html>

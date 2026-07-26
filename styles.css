@@ -660,3 +660,134 @@ input:focus, select:focus { border-color: #82b8fa; box-shadow: 0 0 0 4px rgba(25
   .alert-option-grid { grid-template-columns: 1fr; }
   .alert-option-grid label:last-child { grid-column: auto; }
 }
+
+/* v2.8 — 단순 화면 · 빨강/노랑 노선 · 예약 복원 · 시간 중앙 정렬 */
+.hero {
+  min-height: 268px;
+  border-radius: 0 0 30px 30px;
+}
+.hero-inner { padding-bottom: 48px; }
+.hero-message { margin-top: 28px; }
+.hero-message h2 { margin-top: 8px; font-size: clamp(28px, 5vw, 40px); }
+.hero-message p { margin-top: 8px; }
+.hero-stats, .hero-orb-two { display: none; }
+.radar-grid { opacity: .09; }
+main { gap: 14px; }
+.card { padding: 22px; border-radius: 24px; }
+.section-heading { margin-bottom: 15px; }
+.section-kicker { opacity: .72; }
+.route-card .preset-row { gap: 8px; margin-bottom: 12px; }
+.route-card .preset { min-height: 58px; }
+.journey-panel { padding-top: 18px; padding-bottom: 18px; }
+.nearby-status { min-height: 0; padding: 7px 10px; font-size: 9px; }
+.selected-stop { min-height: 44px; }
+.destination-favorite-bar > span { display: none; }
+.favorite-destination-panel { padding: 8px; }
+.help-card { display: none; }
+.chosen-route-hint, .map-note { display: none; }
+.arrival-card { min-height: 96px; padding: 13px; }
+.arrival-time { font-size: 24px; }
+.live-vehicle-heading { margin-top: 9px; }
+#map { height: 340px; }
+.map-legend { margin-top: 8px; }
+.legend-line.approach { border-color: #ef3340; border-top-style: solid; border-top-width: 4px; }
+.legend-line.journey { border-color: #ffd43b; border-top-width: 5px; box-shadow: 0 1px 0 rgba(94,75,0,.28); }
+.stop-marker.approach { background: #ef3340; }
+.stop-marker.journey { background: #ffd43b; }
+.stop-marker.origin { background: #ef3340; }
+.stop-marker.destination { background: #ffd43b; }
+.bus-marker.approach,
+.bus-marker.return-approach,
+.bus-marker.arrival-first,
+.bus-marker.arrival-second { background: linear-gradient(145deg, #d91f31, #ff5866); box-shadow: 0 8px 22px rgba(211,31,48,.34); }
+.bus-marker.journey { color: #3b3100; background: linear-gradient(145deg, #f2bd00, #ffe36a); box-shadow: 0 8px 22px rgba(177,138,0,.30); }
+
+/* 저장된 예약은 노선 복원에 실패해도 항상 보이게 한다. */
+.alert-card.saved-only .alert-highlight,
+.alert-card.saved-only .alert-route-chip,
+.alert-card.saved-only .time-grid,
+.alert-card.saved-only .field-block,
+.alert-card.saved-only .alert-option-grid,
+.alert-card.saved-only .toggle-line,
+.alert-card.saved-only .alert-actions,
+.alert-card.saved-only .info-box { display: none; }
+.alert-card.saved-only .section-heading { margin-bottom: 4px; }
+.alert-card.saved-only .status-badge { display: none; }
+.alert-card.saved-only .saved-alert-panel { margin-top: 0; padding-top: 8px; border-top: 0; }
+.saved-alert-row { grid-template-columns: auto minmax(0, 1fr) auto; }
+.saved-alert-actions { display: flex; align-items: center; gap: 5px; }
+.saved-alert-load,
+.saved-alert-delete { min-height: 30px; padding: 0 8px; font-size: 9px; font-weight: 900; border-radius: 9px; }
+.saved-alert-load { color: #075ecb; border: 1px solid #cbdff7; background: #f2f8ff; }
+.saved-alert-delete { color: #c33b53; border: 1px solid #f0cbd2; background: #fff6f8; }
+
+/* iOS/iPadOS 시간값을 입력 상자의 정확한 중앙에 배치한다. */
+.time-grid { max-width: 390px; }
+.time-field input[type="time"] {
+  height: 42px;
+  min-height: 42px;
+  padding: 0 8px !important;
+  line-height: 42px;
+  vertical-align: middle;
+}
+.time-field input[type="time"]::-webkit-date-and-time-value {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 42px;
+  min-height: 42px;
+  padding: 0;
+  line-height: 42px;
+}
+.time-field input[type="time"]::-webkit-datetime-edit {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 42px;
+  padding: 0;
+}
+.time-field input[type="time"]::-webkit-datetime-edit-fields-wrapper {
+  display: flex;
+  align-items: center;
+  height: 42px;
+  padding: 0;
+}
+.time-field input[type="time"]::-webkit-datetime-edit-hour-field,
+.time-field input[type="time"]::-webkit-datetime-edit-minute-field,
+.time-field input[type="time"]::-webkit-datetime-edit-text { padding: 0 1px; }
+
+@media (max-width: 560px) {
+  .hero { min-height: 232px; }
+  .hero-inner { padding-bottom: 38px; }
+  .hero-message { margin-top: 22px; }
+  .card { padding: 17px 14px; border-radius: 20px; }
+  #map { height: 300px; }
+  .saved-alert-row { grid-template-columns: auto minmax(0, 1fr); }
+  .saved-alert-actions { grid-column: 1 / -1; justify-content: flex-end; }
+  .saved-alert-load, .saved-alert-delete { min-width: 68px; }
+  .time-field input[type="time"],
+  .time-field input[type="time"]::-webkit-date-and-time-value,
+  .time-field input[type="time"]::-webkit-datetime-edit,
+  .time-field input[type="time"]::-webkit-datetime-edit-fields-wrapper {
+    height: 40px;
+    min-height: 40px;
+    line-height: 40px;
+  }
+}
+
+/* 복잡도를 줄이기 위한 핵심 입력 중심 배치 */
+.alert-highlight { display: none; }
+.journey-line { display: none; }
+.journey-panel { padding-left: 22px; }
+.day-row { gap: 6px; }
+.day {
+  aspect-ratio: auto;
+  min-height: 38px;
+  border-radius: 12px;
+}
+.field-block { margin: 13px 0; }
+.toggle-line { margin-top: 13px; }
+@media (max-width: 560px) {
+  .journey-panel { padding-left: 14px; }
+  .day { min-height: 36px; border-radius: 10px; }
+}

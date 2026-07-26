@@ -49,7 +49,8 @@ const state = {
   audioFailureToastAt: 0,
   foregroundBaselineReady: false,
   futureBusAudioBuffer: null,
-  futureBusAudioBufferPromise: null
+  futureBusAudioBufferPromise: null,
+  restoreBusy: false
 };
 
 const els = {
@@ -73,6 +74,7 @@ const STORED_LOCATION_MAX_AGE_MS = 15 * 60 * 1000;
 const SAVED_ALERTS_KEY = 'hogyeBusAlertsV2';
 const DESTINATION_FAVORITES_KEY = 'hogyeBusDestinationFavoritesV1';
 const LAST_JOURNEY_KEY = 'hogyeBusLastJourneyV1';
+const LAST_SELECTED_ALERT_KEY = 'hogyeBusLastSelectedAlertV1';
 const PUSH_CONNECT_TIMEOUT_MS = 10000;
 
 function isAppleMobileBrowser() {
@@ -450,19 +452,24 @@ function readLastJourney() {
   }
 }
 
-function journeyFromNewestAlert() {
-  const alert = [...state.savedAlerts]
-    .filter(item => item?.routeId && item?.stationId && item?.destinationStationId)
-    .sort((a, b) => number(b.savedAt, 0) - number(a.savedAt, 0))[0];
-  if (!alert) return null;
+function journeyFromAlert(alert) {
+  if (!alert?.routeId || !alert?.stationId || !alert?.destinationStationId) return null;
   return {
     origin: compactFavoriteStation({
       stationId: alert.stationId,
-      stationName: alert.stationName || '탑승 정류장'
+      stationName: alert.stationName || '탑승 정류장',
+      regionName: alert.stationRegionName || '',
+      mobileNo: alert.stationMobileNo || '',
+      x: alert.stationX,
+      y: alert.stationY
     }),
     destination: compactFavoriteStation({
       stationId: alert.destinationStationId,
-      stationName: alert.destinationStationName || '도착 정류장'
+      stationName: alert.destinationStationName || '도착 정류장',
+      regionName: alert.destinationRegionName || '',
+      mobileNo: alert.destinationMobileNo || '',
+      x: alert.destinationX,
+      y: alert.destinationY
     }),
     route: compactJourneyRoute({
       routeId: alert.routeId,
@@ -474,9 +481,25 @@ function journeyFromNewestAlert() {
       destinationStationId: alert.destinationStationId,
       destinationStationName: alert.destinationStationName
     }),
-    routeStations: [],
+    routeStations: Array.isArray(alert.routeStations)
+      ? alert.routeStations.map(normalizeRouteStation).filter(stop => stop.stationId || stop.stationName)
+      : [],
     savedAt: number(alert.savedAt, 0)
   };
+}
+
+function journeyFromSelectedAlert() {
+  const key = localStorage.getItem(LAST_SELECTED_ALERT_KEY) || '';
+  if (!key) return null;
+  const alert = state.savedAlerts.find(item => alertStorageKey(item) === key);
+  return journeyFromAlert(alert);
+}
+
+function journeyFromNewestAlert() {
+  const alert = [...state.savedAlerts]
+    .filter(item => item?.routeId && item?.stationId && item?.destinationStationId)
+    .sort((a, b) => number(b.savedAt, 0) - number(a.savedAt, 0))[0];
+  return journeyFromAlert(alert);
 }
 
 function writeLastJourney() {
@@ -522,7 +545,11 @@ function resetActiveRoute() {
   state.foregroundAlarmKey = '';
   state.foregroundBaselineReady = false;
   els.liveSection?.classList.add('hidden');
-  els.alertSection?.classList.add('hidden');
+  if (els.alertSection) {
+    const hasSavedAlerts = state.savedAlerts.length > 0;
+    els.alertSection.classList.toggle('hidden', !hasSavedAlerts);
+    els.alertSection.classList.toggle('saved-only', hasSavedAlerts);
+  }
   if (els.chosenRoute) els.chosenRoute.innerHTML = '';
   if (els.alertRouteChip) els.alertRouteChip.innerHTML = '';
 }
@@ -1227,6 +1254,11 @@ async function chooseRoute(pair, options = {}) {
   writeLastJourney();
   els.liveSection.classList.remove('hidden');
   els.alertSection.classList.remove('hidden');
+  els.alertSection.classList.remove('saved-only');
+  const currentAlertKey = `${state.route.routeId}_${state.origin.stationId}`;
+  if (state.savedAlerts.some(alert => alertStorageKey(alert) === currentAlertKey)) {
+    localStorage.setItem(LAST_SELECTED_ALERT_KEY, currentAlertKey);
+  }
   const destinationGuide = state.route.destinationNearby
     ? `${esc(state.destination.stationName)} 인근 · ${esc(state.route.destinationStationName)} 하차 후 도보 약 ${Math.max(10, Math.round(state.route.destinationWalkDistance / 10) * 10)}m`
     : esc(state.destination.stationName);
@@ -1890,6 +1922,56 @@ function approachStopSegments(ordered) {
   return segments;
 }
 
+function nearestShapeIndex(latlngs, position, preferredIndex = NaN) {
+  if (!position || !latlngs.length) return -1;
+  const preferred = Number.isFinite(preferredIndex)
+    ? Math.max(0, Math.min(latlngs.length - 1, Math.round(preferredIndex)))
+    : NaN;
+  const radius = Number.isFinite(preferred) ? Math.max(24, Math.round(latlngs.length * .18)) : latlngs.length;
+  const start = Number.isFinite(preferred) ? Math.max(0, preferred - radius) : 0;
+  const end = Number.isFinite(preferred) ? Math.min(latlngs.length - 1, preferred + radius) : latlngs.length - 1;
+  let best = { index: -1, distance: Infinity };
+  for (let index = start; index <= end; index += 1) {
+    const point = latlngs[index];
+    const distance = distanceMeters(position[0], position[1], point[0], point[1]);
+    if (distance < best.distance) best = { index, distance };
+  }
+  return best.index;
+}
+
+function routeShapeSliceForStops(shapeLatlngs, topology, stops) {
+  if (!shapeLatlngs.length || !topology.count || !stops?.length) return [];
+  const first = stops[0];
+  const last = stops[stops.length - 1];
+  const firstSeq = routeStationSequence(first);
+  const lastSeq = routeStationSequence(last);
+  const firstStationIndex = topology.ordered.findIndex(stop => routeStationSequence(stop) === firstSeq);
+  let lastStationIndex = topology.ordered.findIndex(stop => routeStationSequence(stop) === lastSeq);
+  const firstPos = stationPosition(first);
+  const lastPos = stationPosition(last);
+  if (firstStationIndex < 0 || !firstPos || !lastPos) return [];
+
+  const maxShapeIndex = shapeLatlngs.length - 1;
+  const stationDenominator = Math.max(1, topology.count - 1);
+  const firstPreferred = firstStationIndex / stationDenominator * maxShapeIndex;
+  let lastPreferred = lastStationIndex >= 0 ? lastStationIndex / stationDenominator * maxShapeIndex : NaN;
+
+  // 회차 후 노선 끝에서 출발 정류장으로 돌아오는 구간은 shape의 끝부분을 사용한다.
+  const wrapsToOrigin = firstStationIndex > topology.originIndex
+    && sameId(last.stationId, state.origin?.stationId);
+  if (wrapsToOrigin) {
+    lastStationIndex = topology.count - 1;
+    lastPreferred = maxShapeIndex;
+  }
+
+  const shapeStart = nearestShapeIndex(shapeLatlngs, firstPos, firstPreferred);
+  let shapeEnd = wrapsToOrigin
+    ? maxShapeIndex
+    : nearestShapeIndex(shapeLatlngs, lastPos, lastPreferred);
+  if (shapeStart < 0 || shapeEnd < 0 || shapeEnd <= shapeStart) return [];
+  return shapeLatlngs.slice(shapeStart, shapeEnd + 1);
+}
+
 function renderMap(fit = false) {
   const map = ensureMap();
   state.routeLayer.clearLayers();
@@ -1899,12 +1981,12 @@ function renderMap(fit = false) {
   const routeShapeLatlngs = (state.routeShape || []).map(stationPosition).filter(Boolean);
   const routeShapeSegments = splitRoutePath(routeShapeLatlngs);
   routeShapeSegments.forEach(segment => {
-    L.polyline(segment, { color: '#062d66', weight: 10, opacity: .84, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
-    L.polyline(segment, { color: '#36b9ff', weight: 4, opacity: .92, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+    L.polyline(segment, { color: '#ffffff', weight: 10, opacity: .88, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+    L.polyline(segment, { color: '#b8c2cf', weight: 5, opacity: .72, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
   });
   const stationRouteLatlngs = drawPolyline(ordered, {
-    color: '#123f78', weight: routeShapeSegments.length ? 3 : 8,
-    opacity: routeShapeSegments.length ? .30 : .84, lineCap: 'round', lineJoin: 'round'
+    color: '#b8c2cf', weight: routeShapeSegments.length ? 3 : 7,
+    opacity: routeShapeSegments.length ? .22 : .68, lineCap: 'round', lineJoin: 'round'
   });
   const allLatlngs = routeShapeSegments.length ? routeShapeSegments.flat() : stationRouteLatlngs;
   const approachSegments = approachStopSegments(ordered);
@@ -1914,12 +1996,38 @@ function renderMap(fit = false) {
   });
   const afterStops = ordered.filter(stop => number(stop.stationSeq) >= state.route.destinationStaOrder);
 
+  const topology = routeTopology();
+  const canUseExactShape = routeShapeSegments.length === 1 && routeShapeLatlngs.length > 3;
   const approachLatlngs = [];
   approachSegments.forEach(segment => {
-    approachLatlngs.push(...drawPolyline(segment, { color: '#24c8f2', weight: 6, opacity: .96, dashArray: '10 8', lineCap: 'round' }));
+    const exactSegment = canUseExactShape ? routeShapeSliceForStops(routeShapeLatlngs, topology, segment) : [];
+    if (exactSegment.length > 1) {
+      L.polyline(exactSegment, { color: '#78121d', weight: 11, opacity: .30, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+      L.polyline(exactSegment, { color: '#ef3340', weight: 7, opacity: .98, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+      approachLatlngs.push(...exactSegment);
+    } else {
+      drawPolyline(segment, { color: '#78121d', weight: 11, opacity: .30, lineCap: 'round', lineJoin: 'round' });
+      approachLatlngs.push(...drawPolyline(segment, { color: '#ef3340', weight: 7, opacity: .98, lineCap: 'round', lineJoin: 'round' }));
+    }
   });
-  const journeyLatlngs = drawPolyline(journeyStops, { color: '#1975ff', weight: 8, opacity: .98, lineCap: 'round', lineJoin: 'round' });
-  drawPolyline(afterStops, { color: '#8b98aa', weight: 4, opacity: .32, dashArray: '4 9' });
+
+  const exactJourney = canUseExactShape ? routeShapeSliceForStops(routeShapeLatlngs, topology, journeyStops) : [];
+  let journeyLatlngs;
+  if (exactJourney.length > 1) {
+    L.polyline(exactJourney, { color: '#806600', weight: 12, opacity: .28, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+    L.polyline(exactJourney, { color: '#ffd43b', weight: 8, opacity: .99, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+    journeyLatlngs = exactJourney;
+  } else {
+    drawPolyline(journeyStops, { color: '#806600', weight: 12, opacity: .28, lineCap: 'round', lineJoin: 'round' });
+    journeyLatlngs = drawPolyline(journeyStops, { color: '#ffd43b', weight: 8, opacity: .99, lineCap: 'round', lineJoin: 'round' });
+  }
+
+  const exactAfter = canUseExactShape ? routeShapeSliceForStops(routeShapeLatlngs, topology, afterStops) : [];
+  if (exactAfter.length > 1) {
+    L.polyline(exactAfter, { color: '#9da8b5', weight: 4, opacity: .34, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+  } else {
+    drawPolyline(afterStops, { color: '#9da8b5', weight: 4, opacity: .34, lineCap: 'round', lineJoin: 'round' });
+  }
 
   if (allLatlngs.length) {
     const badgePos = allLatlngs[Math.floor(allLatlngs.length / 2)];
@@ -1997,13 +2105,13 @@ function renderMap(fit = false) {
       : `오는 버스 0대 · 전체 ${allCount}대`;
   if (state.vehicleScope === 'approaching') {
     els.mapNote.textContent = confirmedCount
-      ? '공식 도착정보와 실시간 위치를 함께 사용하며, 출발 종점에서는 회차 후 돌아오는 차량도 오는 버스로 표시합니다.'
+      ? '빨간선은 탑승 정류장으로 들어오는 구간, 노란선은 탑승 후 목적지까지 이동할 구간입니다.'
       : predictedCount
         ? '공식 도착 예정 차량이 없어, 현재 노선 위 차량 중 다음 회차에 가장 먼저 올 가능성이 높은 차량을 주황색으로 표시합니다.'
         : '현재 탑승 정류장에 접근 중인 차량이 확인되지 않습니다. “전체 차량”에서 모든 운행 위치를 볼 수 있습니다.';
   } else {
     els.mapNote.textContent = allCount
-      ? '선택한 실제 노선 전체와 모든 운행 차량을 표시합니다. 각 마커에는 노선번호와 차량번호 끝자리가 표시됩니다.'
+      ? '빨간선은 오는 버스 구간, 노란선은 탑승 후 이동 구간입니다. 회색은 나머지 노선입니다.'
       : '선택한 실제 노선은 표시됐지만 현재 운행 차량 정보가 없습니다. 잠시 후 새로고침해 주세요.';
   }
 
@@ -2053,8 +2161,17 @@ function upsertSavedAlert(payload) {
   state.savedAlertAlarmKeys.delete(key);
   state.savedAlertBaselineRoutes.delete(key);
   const next = state.savedAlerts.filter(alert => alertStorageKey(alert) !== key);
-  next.push({ ...payload, _key: key, savedAt: Date.now() });
+  next.push({
+    ...payload,
+    _key: key,
+    routeStations: state.route?.routeId === payload.routeId
+      ? state.routeStations.map(compactJourneyRouteStation).filter(Boolean)
+      : (payload.routeStations || []),
+    savedAt: Date.now()
+  });
+  localStorage.setItem(LAST_SELECTED_ALERT_KEY, key);
   writeSavedAlerts(next);
+  writeLastJourney();
 }
 
 function alertDaysText(days = []) {
@@ -2070,7 +2187,15 @@ function renderSavedAlerts() {
   els.savedAlertCount.textContent = `${state.savedAlerts.length}개`;
   if (!state.savedAlerts.length) {
     els.savedAlerts.innerHTML = '<div class="empty compact-empty">저장된 버스 알림이 없습니다.</div>';
+    if (!state.route && els.alertSection) {
+      els.alertSection.classList.add('hidden');
+      els.alertSection.classList.remove('saved-only');
+    }
     return;
+  }
+  if (!state.route && els.alertSection) {
+    els.alertSection.classList.remove('hidden');
+    els.alertSection.classList.add('saved-only');
   }
   els.savedAlerts.innerHTML = state.savedAlerts.map(alert => `
     <article class="saved-alert-row" data-alert-key="${esc(alertStorageKey(alert))}">
@@ -2080,8 +2205,18 @@ function renderSavedAlerts() {
         <span>${esc(alert.startTime || '00:00')}–${esc(alert.endTime || '23:59')} · ${esc(alertDaysText(alert.days))} · ${number(alert.leadStops, 3)}정거장 전</span>
         <small>${esc(alertModeLabel(alert.alertMode))} · ${esc(alertSoundLabel(alert.alertSound))}</small>
       </div>
-      <button type="button" class="saved-alert-delete" data-delete-alert="${esc(alertStorageKey(alert))}" aria-label="${esc(alert.routeName || '')}번 알림 삭제">삭제</button>
+      <div class="saved-alert-actions">
+        <button type="button" class="saved-alert-load" data-load-alert="${esc(alertStorageKey(alert))}">불러오기</button>
+        <button type="button" class="saved-alert-delete" data-delete-alert="${esc(alertStorageKey(alert))}" aria-label="${esc(alert.routeName || '')}번 알림 삭제">삭제</button>
+      </div>
     </article>`).join('');
+  els.savedAlerts.querySelectorAll('[data-load-alert]').forEach(button => {
+    button.addEventListener('click', async event => {
+      event.preventDefault();
+      event.stopPropagation();
+      await restoreSavedAlert(button.dataset.loadAlert, { scroll: true });
+    });
+  });
   els.savedAlerts.querySelectorAll('[data-delete-alert]').forEach(button => {
     button.addEventListener('click', async event => {
       event.preventDefault();
@@ -2093,6 +2228,45 @@ function renderSavedAlerts() {
       await removeSavedAlert(key);
     });
   });
+}
+
+async function restoreSavedAlert(key, { scroll = false } = {}) {
+  if (!key || state.restoreBusy) return;
+  const alert = state.savedAlerts.find(item => alertStorageKey(item) === key);
+  const journey = journeyFromAlert(alert);
+  if (!journey?.origin || !journey?.destination || !journey?.route) {
+    toast('저장된 알림의 노선정보를 복원할 수 없습니다.');
+    return;
+  }
+  state.restoreBusy = true;
+  localStorage.setItem(LAST_SELECTED_ALERT_KEY, key);
+  try {
+    state.origin = journey.origin;
+    state.destination = journey.destination;
+    renderSelectedStation('origin', state.origin);
+    renderSelectedStation('destination', state.destination);
+    updateDestinationFavoriteControl();
+    await chooseRoute(pairFromStoredJourney(journey), { restore: true });
+    applyAlertToForm(alert);
+    els.alertInfo.textContent = `${alert.routeName}번 예약 설정을 복원했습니다.`;
+    writeLastJourney();
+    if (scroll) els.alertSection?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    toast(`${alert.routeName}번 예약 설정을 불러왔습니다.`);
+  } catch (error) {
+    console.warn('saved alert restore failed', error);
+    toast(`예약 복원 실패: ${error.message}`, 5000);
+  } finally {
+    state.restoreBusy = false;
+  }
+}
+
+async function restoreSavedStateIfNeeded() {
+  if (state.route || state.restoreBusy) return;
+  state.savedAlerts = readSavedAlerts();
+  renderSavedAlerts();
+  const firstAlert = state.savedAlerts[0];
+  const preferred = localStorage.getItem(LAST_SELECTED_ALERT_KEY) || (firstAlert ? alertStorageKey(firstAlert) : '');
+  if (preferred) await restoreSavedAlert(preferred);
 }
 
 function applyAlertToForm(alert) {
@@ -2140,6 +2314,11 @@ async function removeSavedAlert(key) {
     return;
   }
 
+  if (localStorage.getItem(LAST_SELECTED_ALERT_KEY) === key) {
+    const replacement = state.savedAlerts[0];
+    if (replacement) localStorage.setItem(LAST_SELECTED_ALERT_KEY, alertStorageKey(replacement));
+    else localStorage.removeItem(LAST_SELECTED_ALERT_KEY);
+  }
   toast(`${alert.routeName || '버스'}번 알림을 기기에서 삭제했습니다.`);
   if (state.route && state.origin && key === `${state.route.routeId}_${state.origin.stationId}`) {
     els.alertInfo.textContent = `${state.route.routeName}번 알림이 삭제되었습니다. 새 조건으로 다시 저장할 수 있습니다.`;
@@ -2235,7 +2414,7 @@ function soundPattern(sound = 'standard') {
   return patterns[sound] || patterns.standard;
 }
 
-const FUTURE_BUS_ALERT_URL = new URL('/assets/future-bus-alert.mp3?v=2.7.0', window.location.origin).href;
+const FUTURE_BUS_ALERT_URL = new URL('/assets/future-bus-alert.mp3?v=2.8.0', window.location.origin).href;
 let customAlertAudio = null;
 
 function getCustomAlertAudio() {
@@ -2542,7 +2721,7 @@ async function initFirebase() {
     if ('serviceWorker' in navigator) {
       try {
         state.swRegistration = await withTimeout(
-          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.7.0', { scope: '/' }),
+          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.8.0', { scope: '/' }),
           8000,
           '서비스워커 연결 시간이 초과되었습니다.'
         );
@@ -2765,6 +2944,10 @@ function buildAlertPayload(fcmToken) {
     routeName: String(state.route.routeName),
     stationId: String(state.origin.stationId),
     stationName: String(state.origin.stationName),
+    stationRegionName: String(state.origin.regionName || ''),
+    stationMobileNo: String(state.origin.mobileNo || ''),
+    stationX: number(state.origin.x, 0),
+    stationY: number(state.origin.y, 0),
     staOrder: number(state.route.originStaOrder),
     routeDestId: String(state.route.routeDestId || ''),
     routeDestName: String(state.route.routeDestName || ''),
@@ -2778,6 +2961,11 @@ function buildAlertPayload(fcmToken) {
     originAtStart: topology.originAtStart,
     destinationStationId: String(state.route?.destinationStationId || state.destination?.stationId || ''),
     destinationStationName: String(state.route?.destinationStationName || state.destination?.stationName || ''),
+    destinationRegionName: String(state.destination?.regionName || ''),
+    destinationMobileNo: String(state.destination?.mobileNo || ''),
+    destinationX: number(state.destination?.x, 0),
+    destinationY: number(state.destination?.y, 0),
+    destinationStaOrder: number(state.route?.destinationStaOrder, 0),
     leadStops: number($('leadStops').value, 3),
     startTime: $('startTime').value,
     endTime: $('endTime').value,
@@ -2839,8 +3027,23 @@ function setupEvents() {
   [els.originInput, els.destinationInput].forEach((input, index) => input.addEventListener('keydown', event => {
     if (event.key === 'Enter') searchStations(index === 0 ? 'origin' : 'destination');
   }));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && state.route) loadLive(false, { silent: true }); });
-  window.addEventListener('pageshow', event => { if (event.persisted && state.route) loadLive(true, { manual: true }); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      writeLastJourney();
+      return;
+    }
+    if (state.route) loadLive(false, { silent: true });
+    else void restoreSavedStateIfNeeded();
+  });
+  window.addEventListener('pageshow', event => {
+    state.savedAlerts = readSavedAlerts();
+    renderSavedAlerts();
+    if (state.route) {
+      if (event.persisted) loadLive(true, { manual: true });
+    } else {
+      void restoreSavedStateIfNeeded();
+    }
+  });
   window.addEventListener('pagehide', writeLastJourney);
   window.addEventListener('beforeunload', writeLastJourney);
 }
@@ -2849,7 +3052,11 @@ function setupEvents() {
 async function boot() {
   state.savedAlerts = readSavedAlerts();
   state.destinationFavorites = readDestinationFavorites();
-  const savedJourney = readLastJourney() || journeyFromNewestAlert();
+  const storedJourney = readLastJourney();
+  const savedJourney = journeyFromSelectedAlert()
+    || (storedJourney?.route ? storedJourney : null)
+    || journeyFromNewestAlert()
+    || storedJourney;
   if (savedJourney?.origin) {
     state.origin = savedJourney.origin;
     renderSelectedStation('origin', state.origin);
@@ -2891,8 +3098,8 @@ async function boot() {
     } catch (error) {
       console.warn('journey restore failed', error);
       resetActiveRoute();
-      writeLastJourney();
-      els.routeResults.innerHTML = `<div class="empty error">마지막 노선 복원에 실패했습니다. 직행 버스 찾기를 다시 눌러 주세요.<br><small>${esc(error.message)}</small></div>`;
+      renderSavedAlerts();
+      els.routeResults.innerHTML = `<div class="empty error">마지막 노선 복원에 실패했습니다. 아래 저장 알림에서 ‘불러오기’를 눌러 주세요.<br><small>${esc(error.message)}</small></div>`;
     }
     return;
   }
