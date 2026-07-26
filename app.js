@@ -39,13 +39,17 @@ const state = {
   savedAlerts: [],
   savedAlertPoller: null,
   savedAlertAlarmKeys: new Map(),
+  savedAlertBaselineRoutes: new Set(),
   destinationFavorites: [],
   alertSaveBusy: false,
   pushRetryAfter: 0,
   audioUnlocked: false,
   audioUnlockBusy: false,
   sharedAudioContext: null,
-  audioFailureToastAt: 0
+  audioFailureToastAt: 0,
+  foregroundBaselineReady: false,
+  futureBusAudioBuffer: null,
+  futureBusAudioBufferPromise: null
 };
 
 const els = {
@@ -515,6 +519,8 @@ function resetActiveRoute() {
   state.arrival = null;
   state.arrivalList = [];
   state.liveLoading = false;
+  state.foregroundAlarmKey = '';
+  state.foregroundBaselineReady = false;
   els.liveSection?.classList.add('hidden');
   els.alertSection?.classList.add('hidden');
   if (els.chosenRoute) els.chosenRoute.innerHTML = '';
@@ -1204,6 +1210,7 @@ async function chooseRoute(pair, options = {}) {
     button.classList.toggle('active', button.dataset.vehicleScope === 'all');
   });
   state.foregroundAlarmKey = '';
+  state.foregroundBaselineReady = false;
   state.route = {
     routeId: pair.originRoute.routeId,
     routeName: pair.originRoute.routeName,
@@ -2043,6 +2050,8 @@ function writeSavedAlerts(alerts) {
 
 function upsertSavedAlert(payload) {
   const key = alertStorageKey(payload);
+  state.savedAlertAlarmKeys.delete(key);
+  state.savedAlertBaselineRoutes.delete(key);
   const next = state.savedAlerts.filter(alert => alertStorageKey(alert) !== key);
   next.push({ ...payload, _key: key, savedAt: Date.now() });
   writeSavedAlerts(next);
@@ -2112,6 +2121,8 @@ function loadAlertFormForCurrentRoute() {
 
 async function removeSavedAlert(key) {
   const alert = state.savedAlerts.find(item => alertStorageKey(item) === key);
+  state.savedAlertAlarmKeys.delete(key);
+  state.savedAlertBaselineRoutes.delete(key);
   if (!alert) {
     renderSavedAlerts();
     return;
@@ -2224,18 +2235,20 @@ function soundPattern(sound = 'standard') {
   return patterns[sound] || patterns.standard;
 }
 
+const FUTURE_BUS_ALERT_URL = new URL('/assets/future-bus-alert.mp3?v=2.7.0', window.location.origin).href;
 let customAlertAudio = null;
 
 function getCustomAlertAudio() {
+  // HTMLAudio는 Web Audio 재생이 불가능할 때만 실제 알림 순간에 생성한다.
+  // 앱 시작 시에는 음원을 로드하거나 play()하지 않는다.
   if (!customAlertAudio) {
-    customAlertAudio = $('futureBusAudio') || new Audio();
-    if (!customAlertAudio.src) customAlertAudio.src = new URL('/assets/future-bus-alert.mp3?v=2.6.0', window.location.origin).href;
-    customAlertAudio.preload = 'auto';
+    customAlertAudio = new Audio();
+    customAlertAudio.src = FUTURE_BUS_ALERT_URL;
+    customAlertAudio.preload = 'none';
     customAlertAudio.playsInline = true;
     customAlertAudio.setAttribute('playsinline', '');
     customAlertAudio.setAttribute('webkit-playsinline', '');
     customAlertAudio.volume = 0.92;
-    try { customAlertAudio.load(); } catch (_) { /* 브라우저별 load 제한 무시 */ }
   }
   return customAlertAudio;
 }
@@ -2249,81 +2262,75 @@ function getSharedAudioContext() {
   return state.sharedAudioContext;
 }
 
+async function loadFutureBusAudioBuffer() {
+  if (state.futureBusAudioBuffer) return state.futureBusAudioBuffer;
+  if (state.futureBusAudioBufferPromise) return state.futureBusAudioBufferPromise;
+  const ctx = getSharedAudioContext();
+  if (!ctx) return null;
+  state.futureBusAudioBufferPromise = (async () => {
+    const response = await fetch(FUTURE_BUS_ALERT_URL, { cache: 'force-cache' });
+    if (!response.ok) throw new Error(`알림음 파일을 불러오지 못했습니다. (${response.status})`);
+    const bytes = await response.arrayBuffer();
+    const buffer = await ctx.decodeAudioData(bytes.slice(0));
+    state.futureBusAudioBuffer = buffer;
+    return buffer;
+  })().finally(() => {
+    state.futureBusAudioBufferPromise = null;
+  });
+  return state.futureBusAudioBufferPromise;
+}
+
 async function unlockAudioFromGesture() {
   if (state.audioUnlocked || state.audioUnlockBusy) return state.audioUnlocked;
   state.audioUnlockBusy = true;
-  let unlocked = false;
-  let audio = null;
-  let previousMuted = false;
-  let previousVolume = 0.92;
-  let playback = null;
-
-  // 중요: iOS의 사용자 제스처가 유지되는 첫 동기 구간에서 play()를 먼저 호출한다.
-  try {
-    audio = getCustomAlertAudio();
-    previousMuted = audio.muted;
-    previousVolume = audio.volume;
-    audio.muted = true;
-    audio.volume = 0;
-    audio.currentTime = 0;
-    playback = audio.play();
-  } catch (error) {
-    console.debug('html audio unlock start skipped', error);
-  }
-
-  let contextResume = null;
   try {
     const ctx = getSharedAudioContext();
-    if (ctx) {
-      contextResume = ctx.state === 'suspended' ? ctx.resume() : Promise.resolve();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      gain.gain.value = 0.00001;
-      osc.connect(gain).connect(ctx.destination);
-      osc.start();
-      osc.stop(ctx.currentTime + 0.025);
-    }
-  } catch (error) {
-    console.debug('web audio unlock start skipped', error);
-  }
+    if (!ctx) return false;
+    if (ctx.state === 'suspended') await ctx.resume();
 
-  try {
-    if (playback?.then) await playback;
-    if (audio) {
-      audio.pause();
-      audio.currentTime = 0;
-      audio.muted = previousMuted;
-      audio.volume = previousVolume || 0.92;
-      unlocked = true;
-    }
+    // 실제 노래 대신 출력 게인이 0인 짧은 신호로 오디오 권한만 준비한다.
+    // 따라서 앱을 열거나 화면을 처음 눌러도 알림음이 들리지 않는다.
+    const oscillator = ctx.createOscillator();
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    oscillator.connect(gain).connect(ctx.destination);
+    oscillator.start();
+    oscillator.stop(ctx.currentTime + 0.015);
+    state.audioUnlocked = ctx.state === 'running';
+    if (state.audioUnlocked) void loadFutureBusAudioBuffer().catch(error => console.debug('future alert preload skipped', error));
+    return state.audioUnlocked;
   } catch (error) {
-    console.debug('html audio unlock skipped', error);
-    if (audio) {
-      audio.muted = previousMuted;
-      audio.volume = previousVolume || 0.92;
-    }
-  }
-
-  try {
-    if (contextResume?.then) await contextResume;
-    const ctx = state.sharedAudioContext;
-    unlocked = unlocked || ctx?.state === 'running';
-  } catch (error) {
-    console.debug('web audio unlock skipped', error);
+    console.debug('audio context unlock skipped', error);
+    return false;
   } finally {
     state.audioUnlockBusy = false;
   }
-  state.audioUnlocked = unlocked;
-  return unlocked;
 }
 
 async function playFutureBusAlert({ fromTest = false, fallback = true } = {}) {
-  const audio = getCustomAlertAudio();
   try {
+    const ctx = getSharedAudioContext();
+    if (ctx) {
+      if (ctx.state === 'suspended') await ctx.resume();
+      const buffer = await withTimeout(loadFutureBusAudioBuffer(), 9000, '미래형 알림음 준비 시간이 초과되었습니다.');
+      if (buffer && ctx.state === 'running') {
+        const source = ctx.createBufferSource();
+        const gain = ctx.createGain();
+        source.buffer = buffer;
+        gain.gain.value = 0.92;
+        source.connect(gain).connect(ctx.destination);
+        source.start(0);
+        state.audioUnlocked = true;
+        return true;
+      }
+    }
+
+    // Web Audio를 지원하지 않는 브라우저에서 실제 테스트/알림 순간에만 사용한다.
+    const audio = getCustomAlertAudio();
     audio.pause();
+    audio.currentTime = 0;
     audio.muted = false;
     audio.volume = 0.92;
-    audio.currentTime = 0;
     const playback = audio.play();
     if (playback?.then) await playback;
     state.audioUnlocked = true;
@@ -2334,7 +2341,7 @@ async function playFutureBusAlert({ fromTest = false, fallback = true } = {}) {
     if (fromTest || now - state.audioFailureToastAt > 12000) {
       state.audioFailureToastAt = now;
       const detail = error?.name === 'NotAllowedError'
-        ? '화면을 한 번 누른 뒤 다시 테스트해 주세요.'
+        ? '알림 테스트를 한 번 눌러 소리 권한을 준비해 주세요.'
         : '음원 재생에 실패해 기본 차임으로 대신 재생합니다.';
       toast(`미래형 알림음 재생 실패 · ${detail}`, 4500);
     }
@@ -2442,6 +2449,14 @@ async function checkSavedAlertRoutes() {
       const lead = number(alert.leadStops, 3);
       const vehicleKey = String(item.plateNo1 || item.vehId1 || 'unknown');
       const alarmKey = `${new Date().toDateString()}:${routeKey}:${vehicleKey}`;
+      // 앱을 열었을 때 이미 알림 구간 안에 있던 버스는 기준 상태만 기록한다.
+      // 이후 다른 버스가 새로 진입할 때만 소리를 재생해 시작하자마자 노래가 나오는 현상을 막는다.
+      if (!state.savedAlertBaselineRoutes.has(routeKey)) {
+        state.savedAlertBaselineRoutes.add(routeKey);
+        if (locationNo > 0 && locationNo <= lead) state.savedAlertAlarmKeys.set(routeKey, alarmKey);
+        else state.savedAlertAlarmKeys.delete(routeKey);
+        continue;
+      }
       if (locationNo > 0 && locationNo <= lead && state.savedAlertAlarmKeys.get(routeKey) !== alarmKey) {
         state.savedAlertAlarmKeys.set(routeKey, alarmKey);
         state.lastAlertAt = Date.now();
@@ -2487,6 +2502,15 @@ function checkForegroundAlarm() {
   const lead = number($('leadStops').value, 3);
   const vehicleKey = plate || vehicleId || 'unknown';
   const key = `${new Date().toDateString()}:${state.route.routeId}:${vehicleKey}`;
+
+  // 노선을 처음 복원하거나 선택했을 때 이미 가까이 있던 차량은 기준값만 잡는다.
+  // 다음 차량이 새로 알림 구간에 들어오는 순간부터 알림을 울린다.
+  if (!state.foregroundBaselineReady) {
+    state.foregroundBaselineReady = true;
+    state.foregroundAlarmKey = locationNo > 0 && locationNo <= lead ? key : '';
+    return;
+  }
+
   if (locationNo > 0 && locationNo <= lead && key !== state.foregroundAlarmKey) {
     state.foregroundAlarmKey = key;
     state.lastAlertAt = Date.now();
@@ -2518,7 +2542,7 @@ async function initFirebase() {
     if ('serviceWorker' in navigator) {
       try {
         state.swRegistration = await withTimeout(
-          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.6.0', { scope: '/' }),
+          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.7.0', { scope: '/' }),
           8000,
           '서비스워커 연결 시간이 초과되었습니다.'
         );
@@ -2840,9 +2864,9 @@ async function boot() {
   updateDestinationFavoriteControl();
   startSavedAlertPolling();
   setupEvents();
-  // iOS/iPadOS는 첫 사용자 제스처에서 오디오 객체를 미리 해제해야 이후 자동 알림음이 재생된다.
+  // 첫 사용자 제스처에서는 실제 노래를 재생하지 않고 Web Audio 권한만 무음으로 준비한다.
   const primeAudio = event => {
-    // 테스트 버튼은 click 핸들러에서 실제 음원을 즉시 재생하므로 사전 무음 재생과 경합시키지 않는다.
+    // 테스트 버튼은 click 핸들러에서 선택한 알림음을 직접 재생한다.
     if (event?.target?.closest?.('#testAlert')) return;
     void unlockAudioFromGesture();
   };
