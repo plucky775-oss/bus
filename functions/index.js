@@ -56,7 +56,7 @@ async function fetchArrival(serviceKey, alert) {
   url.searchParams.set('staOrder', String(alert.staOrder));
 
   const response = await fetch(url, {
-    headers: { Accept: 'application/json, application/xml;q=0.9', 'User-Agent': 'hogye-bus-alert-functions/1.1' },
+    headers: { Accept: 'application/json, application/xml;q=0.9', 'User-Agent': 'hogye-bus-alert-functions/1.5' },
     signal: AbortSignal.timeout(12000)
   });
   const text = await response.text();
@@ -112,7 +112,8 @@ exports.watchBusAlerts = onSchedule({
       const leadStops = Number(alert.leadStops || 3);
       const plateNo = String(arrival?.plateNo1 || '');
       const flag = String(arrival?.flag || '');
-      const approaching = locationNo > 0 && locationNo <= leadStops && ['RUN', 'PASS'].includes(flag);
+      const flagAllowsAlert = !flag || ['RUN', 'PASS'].includes(flag);
+      const approaching = locationNo > 0 && locationNo <= leadStops && flagAllowsAlert;
 
       if (!approaching) {
         const busMovedOutsideThreshold = locationNo > leadStops;
