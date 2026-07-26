@@ -298,7 +298,7 @@ export default async function handler(req, res) {
     const upstream = await fetch(url, {
       headers: {
         Accept: 'application/json, application/xml;q=0.9, text/plain;q=0.5',
-        'User-Agent': 'hogye-bus-alert/1.8'
+        'User-Agent': 'hogye-bus-alert/1.9'
       },
       signal: AbortSignal.timeout(12000)
     });
