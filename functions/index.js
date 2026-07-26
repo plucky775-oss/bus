@@ -104,7 +104,7 @@ async function fetchGbis(serviceKey, endpoint, params, dataKey, { single = false
   Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, String(value)));
 
   const response = await fetch(url, {
-    headers: { Accept: 'application/json, application/xml;q=0.9', 'User-Agent': 'hogye-bus-alert-functions/2.0' },
+    headers: { Accept: 'application/json, application/xml;q=0.9', 'User-Agent': 'hogye-bus-alert-functions/2.1' },
     signal: AbortSignal.timeout(12000)
   });
   const text = await response.text();
@@ -394,7 +394,8 @@ exports.watchBusAlerts = onSchedule({
           body,
           tag: `bus-${alert.routeId}-${alert.stationId}`,
           url: '/?from=push',
-          alertMode: String(alert.alertMode || 'push')
+          alertMode: String(alert.alertMode || 'push'),
+          alertSound: String(alert.alertSound || 'standard')
         },
         webpush: {
           headers: { Urgency: 'high' },
