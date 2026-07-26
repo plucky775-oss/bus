@@ -25,8 +25,8 @@ const firebaseConfig = {
   appId: ${js(config.appId)}
 };
 
-const CACHE = 'hogye-bus-alert-v27';
-const CORE = ['/', '/index.html', '/styles.css?v=2.7.0', '/app.js?v=2.7.0', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png', '/assets/future-bus-alert.mp3?v=2.7.0'];
+const CACHE = 'hogye-bus-alert-v28';
+const CORE = ['/', '/index.html', '/styles.css?v=2.8.0', '/app.js?v=2.8.0', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png', '/assets/future-bus-alert.mp3?v=2.8.0'];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(CORE)).catch(() => undefined));
