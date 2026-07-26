@@ -470,3 +470,28 @@ input:focus, select:focus { border-color: #82b8fa; box-shadow: 0 0 0 4px rgba(25
   .chosen-route-number { min-width: 54px; font-size: 17px; }
   .route-map-badge { transform: scale(.9); }
 }
+
+
+/* v1.6 위치·오는 버스·실제 노선 안정화 */
+.nearby-status { min-height: 18px; margin: 7px 2px 4px; color: #6d7d93; font-size: 9px; line-height: 1.45; }
+.location-button.loading svg { animation: locationPulse 1s ease-in-out infinite; }
+@keyframes locationPulse { 50% { transform: scale(1.18); opacity: .55; } }
+
+.live-vehicle-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 4px 2px 9px; }
+.live-vehicle-heading strong { font-size: 12px; }
+.live-vehicle-heading span { color: var(--muted); font-size: 9px; }
+.live-vehicles { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 13px; }
+.live-vehicle-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; min-height: 58px; padding: 9px 11px; text-align: left; border: 1px solid #dde7f3; border-radius: 15px; background: linear-gradient(145deg, #fff, #f8fbff); box-shadow: 0 7px 18px rgba(24, 63, 112, .055); }
+.live-vehicle-row.incoming { border-color: #9fd9ff; background: linear-gradient(145deg, #eaf8ff, #f9fdff); box-shadow: 0 8px 20px rgba(16, 128, 224, .11); }
+.live-route-badge { min-width: 43px; padding: 7px 8px; color: #fff; text-align: center; font-size: 12px; font-weight: 950; border-radius: 11px; background: linear-gradient(145deg, #075ad9, #1597ff); }
+.live-vehicle-copy { min-width: 0; }
+.live-vehicle-copy strong, .live-vehicle-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-vehicle-copy strong { font-size: 11px; }
+.live-vehicle-copy small { margin-top: 3px; color: #6e7e94; font-size: 8px; }
+.live-vehicle-state { padding: 5px 7px; color: #65748a; font-size: 8px; font-weight: 900; border-radius: 999px; background: #eef2f7; white-space: nowrap; }
+.live-vehicle-row.incoming .live-vehicle-state { color: #006a9c; background: #d8f4ff; }
+
+@media (max-width: 560px) {
+  .live-vehicles { grid-template-columns: 1fr; }
+  .live-vehicle-row { min-height: 55px; }
+}

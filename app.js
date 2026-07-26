@@ -17,7 +17,7 @@ const state = {
   markerLayer: null,
   userLocation: null,
   mapScope: 'full',
-  vehicleScope: 'all',
+  vehicleScope: 'approaching',
   poller: null,
   firebase: null,
   firebaseConfig: null,
@@ -25,7 +25,12 @@ const state = {
   foregroundAlarmKey: '',
   lastAlertAt: 0,
   liveLoading: false,
-  firebaseAuthError: null
+  firebaseAuthError: null,
+  nearbyRequestId: 0,
+  liveRequestId: 0,
+  liveAbortController: null,
+  lastLocationSuccessAt: 0,
+  lastLiveUpdatedAt: 0
 };
 
 const els = {
@@ -36,7 +41,8 @@ const els = {
   chosenRoute: $('chosenRoute'), arrivalGrid: $('arrivalGrid'), pushState: $('pushState'),
   busCount: $('busCount'), mapNote: $('mapNote'), nearbyOrigin: $('nearbyOrigin'),
   toast: $('toast'), alarmAudio: $('alarmAudio'), alertInfo: $('alertInfo'),
-  refreshLive: $('refreshLive'), refreshLiveLabel: $('refreshLiveLabel')
+  refreshLive: $('refreshLive'), refreshLiveLabel: $('refreshLiveLabel'),
+  nearbyStatus: $('nearbyStatus'), liveVehicles: $('liveVehicles'), liveUpdated: $('liveUpdated')
 };
 
 function toast(message, ms = 2600) {
@@ -60,6 +66,33 @@ function sameId(a, b) {
   return String(a ?? '').trim() !== '' && String(a ?? '').trim() === String(b ?? '').trim();
 }
 
+function normalizeName(value = '') {
+  return String(value).replace(/[\s.·,()\-]/g, '').toLowerCase();
+}
+
+function normalizePlate(value = '') {
+  return String(value).replace(/\s/g, '').toUpperCase();
+}
+
+function normalizeKoreaCoordinate(xRaw, yRaw) {
+  const x = number(xRaw, NaN);
+  const y = number(yRaw, NaN);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const valid = (lat, lng) => lat >= 32.5 && lat <= 40 && lng >= 123 && lng <= 133;
+  if (valid(y, x)) return { lat: y, lng: x };
+  if (valid(x, y)) return { lat: x, lng: y };
+  return null;
+}
+
+function coordinateFields(item) {
+  const coordinate = normalizeKoreaCoordinate(
+    item?.x ?? item?.gpsX ?? item?.longitude ?? item?.lng,
+    item?.y ?? item?.gpsY ?? item?.latitude ?? item?.lat
+  );
+  return coordinate ? { x: coordinate.lng, y: coordinate.lat } : {};
+}
+
+
 function routeStationSequence(item) {
   return number(item?.stationSeq ?? item?.staOrder ?? item?.stationOrder, NaN);
 }
@@ -67,20 +100,18 @@ function routeStationSequence(item) {
 function normalizeRouteStation(item) {
   return {
     ...item,
+    ...coordinateFields(item),
     stationId: String(item?.stationId ?? item?.stationID ?? '').trim(),
     stationSeq: routeStationSequence(item),
-    stationName: item?.stationName || item?.stationNm || '',
-    x: item?.x ?? item?.gpsX ?? item?.longitude,
-    y: item?.y ?? item?.gpsY ?? item?.latitude
+    stationName: item?.stationName || item?.stationNm || ''
   };
 }
 
 function normalizeRouteShapePoint(item) {
   return {
     ...item,
-    lineSeq: number(item?.lineSeq ?? item?.seq ?? item?.shapeSeq, NaN),
-    x: item?.x ?? item?.gpsX ?? item?.longitude,
-    y: item?.y ?? item?.gpsY ?? item?.latitude
+    ...coordinateFields(item),
+    lineSeq: number(item?.lineSeq ?? item?.seq ?? item?.shapeSeq, NaN)
   };
 }
 
@@ -93,6 +124,7 @@ function normalizeBusLocation(item) {
   }
   return {
     ...item,
+    ...coordinateFields(item),
     stationId,
     stationSeq,
     vehId: String(item?.vehId ?? item?.vehicleId ?? '').trim(),
@@ -139,19 +171,43 @@ function reconcileRouteOrders() {
   }
 }
 
-async function api(action, params = {}) {
+async function api(action, params = {}, options = {}) {
   const url = new URL('/api/gbis', location.origin);
   url.searchParams.set('action', action);
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const response = await fetch(url, { cache: 'no-store' });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.ok) {
-    const error = new Error(data.message || '버스정보를 가져오지 못했습니다.');
-    error.code = data.code || '';
-    error.requiredApi = data.requiredApi || '';
+  if (options.fresh) url.searchParams.set('_t', String(Date.now()));
+
+  const controller = new AbortController();
+  let timedOut = false;
+  const forwardAbort = () => controller.abort();
+  options.signal?.addEventListener('abort', forwardAbort, { once: true });
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, options.timeout || 18000);
+
+  try {
+    const response = await fetch(url, { cache: 'no-store', signal: controller.signal });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      const error = new Error(data.message || '버스정보를 가져오지 못했습니다.');
+      error.code = data.code || '';
+      error.requiredApi = data.requiredApi || '';
+      throw error;
+    }
+    return data;
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      const abortError = new Error(timedOut ? '버스정보 응답 시간이 초과되었습니다. 다시 눌러 주세요.' : '이전 요청을 취소하고 새로 갱신합니다.');
+      abortError.name = 'AbortError';
+      abortError.code = timedOut ? 'CLIENT_TIMEOUT' : 'REQUEST_ABORTED';
+      throw abortError;
+    }
     throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    options.signal?.removeEventListener('abort', forwardAbort);
   }
-  return data;
 }
 
 function updateApiState(error) {
@@ -227,27 +283,51 @@ function getCurrentPosition(options) {
   return new Promise((resolve, reject) => navigator.geolocation.getCurrentPosition(resolve, reject, options));
 }
 
+function watchBestPosition(duration = 9000) {
+  return new Promise((resolve, reject) => {
+    let best = null;
+    let lastError = null;
+    let watchId = null;
+    let timer = null;
+    const finish = () => {
+      if (watchId !== null) navigator.geolocation.clearWatch(watchId);
+      if (timer) clearTimeout(timer);
+      if (best) resolve(best);
+      else reject(lastError || Object.assign(new Error('현재 위치 확인 시간이 초과되었습니다.'), { code: 3 }));
+    };
+    watchId = navigator.geolocation.watchPosition(position => {
+      if (!best || number(position.coords.accuracy, 99999) < number(best.coords.accuracy, 99999)) best = position;
+      if (number(position.coords.accuracy, 99999) <= 45) finish();
+    }, error => {
+      lastError = error;
+      if (error?.code === 1) finish();
+    }, {
+      enableHighAccuracy: true,
+      timeout: duration,
+      maximumAge: 0
+    });
+    timer = setTimeout(finish, duration + 700);
+  });
+}
+
+
 async function resolveUserPosition() {
   let quickPosition = null;
   let quickError = null;
   try {
     quickPosition = await getCurrentPosition({
       enableHighAccuracy: false,
-      timeout: 8000,
-      maximumAge: 300000
+      timeout: 7000,
+      maximumAge: 120000
     });
   } catch (error) {
     quickError = error;
   }
 
-  if (quickPosition && number(quickPosition.coords.accuracy, 9999) <= 120) return quickPosition;
+  if (quickPosition && number(quickPosition.coords.accuracy, 9999) <= 70) return quickPosition;
 
   try {
-    const precisePosition = await getCurrentPosition({
-      enableHighAccuracy: true,
-      timeout: 18000,
-      maximumAge: 0
-    });
+    const precisePosition = await watchBestPosition(9000);
     if (!quickPosition) return precisePosition;
     return number(precisePosition.coords.accuracy, 9999) < number(quickPosition.coords.accuracy, 9999)
       ? precisePosition
@@ -270,73 +350,101 @@ function distanceMeters(lat1, lng1, lat2, lng2) {
 
 function normalizeNearbyStations(items, latitude, longitude) {
   const unique = new Map();
-  items.forEach(station => {
-    const lat = number(station.y, NaN);
-    const lng = number(station.x, NaN);
-    const measuredDistance = Number.isFinite(lat) && Number.isFinite(lng)
-      ? distanceMeters(latitude, longitude, lat, lng)
+  items.forEach(rawStation => {
+    const station = { ...rawStation, ...coordinateFields(rawStation) };
+    const coordinate = normalizeKoreaCoordinate(station.x, station.y);
+    const measuredDistance = coordinate
+      ? distanceMeters(latitude, longitude, coordinate.lat, coordinate.lng)
       : number(station.distance, 999999);
     const normalized = { ...station, distance: Math.round(measuredDistance) };
     const key = String(station.stationId || `${station.stationName}:${station.x}:${station.y}`);
     const previous = unique.get(key);
     if (!previous || number(normalized.distance, 999999) < number(previous.distance, 999999)) unique.set(key, normalized);
   });
-  return [...unique.values()].sort((a, b) => number(a.distance, 999999) - number(b.distance, 999999));
+  return [...unique.values()]
+    .filter(station => number(station.distance, 999999) <= 1100)
+    .sort((a, b) => number(a.distance, 999999) - number(b.distance, 999999));
 }
 
-async function fetchNearbyStations(latitude, longitude) {
+async function fetchNearbyStations(latitude, longitude, signal) {
   const queryPoint = async (lat, lng) => api('stationAround', {
-    x: lng.toFixed(7),
-    y: lat.toFixed(7)
-  });
+    x: Number(lng).toFixed(7),
+    y: Number(lat).toFixed(7)
+  }, { signal, fresh: true, timeout: 15000 });
 
-  const primary = await queryPoint(latitude, longitude);
-  let items = primary.items || [];
-  if (items.length) return normalizeNearbyStations(items, latitude, longitude);
+  // GBIS 주변 검색 반경 경계와 모바일 GPS 오차를 모두 보완하기 위해
+  // 현재 좌표와 약 320m 떨어진 동·서·남·북을 함께 조회한다.
+  const latOffset = 0.0029;
+  const lngOffset = 0.0036;
+  const primaryPoints = [
+    [latitude, longitude],
+    [latitude + latOffset, longitude],
+    [latitude - latOffset, longitude],
+    [latitude, longitude + lngOffset],
+    [latitude, longitude - lngOffset]
+  ];
+  const primary = await Promise.allSettled(primaryPoints.map(([lat, lng]) => queryPoint(lat, lng)));
+  let items = primary.flatMap(result => result.status === 'fulfilled' ? (result.value.items || []) : []);
+  let normalized = normalizeNearbyStations(items, latitude, longitude);
 
-  // GBIS 주변정류소 API의 검색 반경 경계에 걸리는 경우를 위해
-  // 약 220m 떨어진 네 지점을 보조 조회해 실제 위치 기준 가까운 순으로 다시 계산한다.
-  const latOffset = 0.0020;
-  const lngOffset = 0.0025;
-  const results = await Promise.allSettled([
-    queryPoint(latitude + latOffset, longitude),
-    queryPoint(latitude - latOffset, longitude),
-    queryPoint(latitude, longitude + lngOffset),
-    queryPoint(latitude, longitude - lngOffset)
-  ]);
-  items = results.flatMap(result => result.status === 'fulfilled' ? (result.value.items || []) : []);
-  return normalizeNearbyStations(items, latitude, longitude).filter(station => number(station.distance, 999999) <= 900);
+  if (normalized.length < 6) {
+    const diagonals = await Promise.allSettled([
+      queryPoint(latitude + latOffset, longitude + lngOffset),
+      queryPoint(latitude + latOffset, longitude - lngOffset),
+      queryPoint(latitude - latOffset, longitude + lngOffset),
+      queryPoint(latitude - latOffset, longitude - lngOffset)
+    ]);
+    items = items.concat(diagonals.flatMap(result => result.status === 'fulfilled' ? (result.value.items || []) : []));
+    normalized = normalizeNearbyStations(items, latitude, longitude);
+  }
+
+  const firstFailure = [...primary].find(result => result.status === 'rejected');
+  if (!normalized.length && firstFailure) throw firstFailure.reason;
+  return normalized;
 }
 
 async function findNearbyOriginStations() {
+  if (!window.isSecureContext) return toast('현재 위치는 HTTPS 주소에서만 사용할 수 있습니다.', 4000);
   if (!navigator.geolocation) return toast('이 브라우저는 현재 위치 기능을 지원하지 않습니다.', 4000);
+  const requestId = ++state.nearbyRequestId;
   const listEl = els.originSuggestions;
   const button = els.nearbyOrigin;
   button.disabled = true;
   button.classList.add('loading');
+  if (els.nearbyStatus) els.nearbyStatus.textContent = 'GPS 위치를 확인하고 있습니다…';
   listEl.innerHTML = '<div class="empty">현재 위치를 확인하는 중…</div>';
 
   try {
     const position = await resolveUserPosition();
+    if (requestId !== state.nearbyRequestId) return;
     const { latitude, longitude, accuracy } = position.coords;
     state.userLocation = { lat: latitude, lng: longitude, accuracy: number(accuracy, 0) };
+    if (els.nearbyStatus) els.nearbyStatus.textContent = `위치 확인 완료 · 정확도 약 ${Math.round(number(accuracy, 0))}m · 주변 검색 중…`;
     if (state.map) renderMap(false);
 
-    listEl.innerHTML = '<div class="empty">가까운 정류장을 찾는 중…</div>';
-    const nearby = (await fetchNearbyStations(latitude, longitude)).slice(0, 20);
+    listEl.innerHTML = '<div class="empty">현재 좌표 주변 정류장을 넓게 찾는 중…</div>';
+    const nearby = (await fetchNearbyStations(latitude, longitude)).slice(0, 24);
+    if (requestId !== state.nearbyRequestId) return;
     renderStationSuggestions('origin', nearby, { nearby: true });
 
     if (nearby.length) {
+      if (els.nearbyStatus) els.nearbyStatus.textContent = `현재 위치 기준 ${nearby.length}개 정류장 · 가까운 순서`;
       toast(`현재 위치 주변에서 ${nearby.length}개 정류장을 찾았습니다.`);
     } else {
-      listEl.innerHTML = '<div class="empty">현재 위치 가까이에 조회되는 경기버스 정류장이 없습니다. 정류장 이름 검색을 이용해 주세요.</div>';
+      if (els.nearbyStatus) els.nearbyStatus.textContent = '1.1km 안에서 조회되는 경기버스 정류장이 없습니다.';
+      listEl.innerHTML = '<div class="empty">현재 위치 1.1km 안에 조회되는 경기버스 정류장이 없습니다. 위치 권한의 “정확한 위치”를 켜거나 정류장 이름 검색을 이용해 주세요.</div>';
     }
   } catch (error) {
-    listEl.innerHTML = `<div class="empty error">${esc(geolocationMessage(error))}</div>`;
+    if (requestId !== state.nearbyRequestId) return;
+    const message = geolocationMessage(error);
+    if (els.nearbyStatus) els.nearbyStatus.textContent = message;
+    listEl.innerHTML = `<div class="empty error">${esc(message)}</div>`;
     if (error?.code && ![1, 2, 3].includes(error.code)) updateApiState(error);
   } finally {
-    button.disabled = false;
-    button.classList.remove('loading');
+    if (requestId === state.nearbyRequestId) {
+      button.disabled = false;
+      button.classList.remove('loading');
+    }
   }
 }
 
@@ -408,17 +516,18 @@ async function findRoutes() {
 }
 
 async function chooseRoute(pair) {
+  state.liveAbortController?.abort();
   state.routeStations = [];
   state.routeShape = [];
   state.locations = [];
   state.arrival = null;
   state.mapScope = 'full';
-  state.vehicleScope = 'all';
+  state.vehicleScope = 'approaching';
   document.querySelectorAll('[data-map-scope]').forEach(button => {
     button.classList.toggle('active', button.dataset.mapScope === 'full');
   });
   document.querySelectorAll('[data-vehicle-scope]').forEach(button => {
-    button.classList.toggle('active', button.dataset.vehicleScope === 'all');
+    button.classList.toggle('active', button.dataset.vehicleScope === 'approaching');
   });
   state.foregroundAlarmKey = '';
   state.route = {
@@ -431,77 +540,95 @@ async function chooseRoute(pair) {
   };
   els.liveSection.classList.remove('hidden');
   els.alertSection.classList.remove('hidden');
-  els.chosenRoute.innerHTML = `<div class="chosen-route-main"><span class="chosen-route-number">${esc(state.route.routeName)}</span><span><strong>${esc(state.route.routeDestName || '선택 노선')} 방면</strong><p>${esc(state.origin.stationName)} → ${esc(state.destination.stationName)}</p></span></div><small class="chosen-route-hint">노선 전체와 현재 운행 중인 모든 차량을 지도에 표시합니다.</small>`;
+  els.chosenRoute.innerHTML = `<div class="chosen-route-main"><span class="chosen-route-number">${esc(state.route.routeName)}</span><span><strong>${esc(state.route.routeDestName || '선택 노선')} 방면</strong><p>${esc(state.origin.stationName)} → ${esc(state.destination.stationName)}</p></span></div><small class="chosen-route-hint">실제 노선 전체를 먼저 그리고, 탑승 정류장으로 오는 차량을 버스 번호와 함께 표시합니다.</small>`;
+  if (els.liveVehicles) els.liveVehicles.innerHTML = '<div class="empty">노선과 운행 차량을 불러오는 중…</div>';
   els.liveSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  await loadLive(true);
+  await loadLive(true, { manual: true });
   startPolling();
 }
 
 async function loadLive(fit = false, { manual = false, silent = false } = {}) {
   if (!state.route || !state.origin) return;
-  if (state.liveLoading) {
-    if (manual) toast('실시간 정보를 갱신하고 있습니다.');
-    return;
-  }
+  if (state.liveLoading && !manual) return;
+  if (state.liveLoading && manual) state.liveAbortController?.abort();
 
+  const requestId = ++state.liveRequestId;
+  const controller = new AbortController();
+  state.liveAbortController = controller;
   state.liveLoading = true;
   if (els.refreshLive) {
     els.refreshLive.disabled = true;
     els.refreshLive.classList.add('is-loading');
   }
   if (els.refreshLiveLabel) els.refreshLiveLabel.textContent = '갱신 중';
+  if (els.liveUpdated) els.liveUpdated.textContent = '실시간 정보 확인 중…';
 
   const errors = [];
   try {
     if (!state.routeStations.length) {
-      const stationsData = await api('routeStations', { routeId: state.route.routeId });
+      const stationsData = await api('routeStations', { routeId: state.route.routeId }, { signal: controller.signal, timeout: 20000 });
+      if (requestId !== state.liveRequestId) return;
       state.routeStations = (stationsData.items || [])
         .map(normalizeRouteStation)
-        .filter(stop => Number.isFinite(routeStationSequence(stop)))
+        .filter(stop => Number.isFinite(routeStationSequence(stop)) && stationPosition(stop))
         .sort((a, b) => routeStationSequence(a) - routeStationSequence(b));
     }
 
-    if (!state.routeStations.length) throw new Error('선택한 버스의 경유 정류소 정보를 찾지 못했습니다.');
+    if (!state.routeStations.length) throw new Error('선택한 버스의 경유 정류소 좌표를 찾지 못했습니다. 노선 API 승인 상태를 확인해 주세요.');
     reconcileRouteOrders();
 
     const [shapeResult, locationResult, arrivalResult] = await Promise.allSettled([
-      state.routeShape.length ? Promise.resolve({ items: state.routeShape }) : api('routeLines', { routeId: state.route.routeId }),
-      api('busLocations', { routeId: state.route.routeId }),
+      state.routeShape.length
+        ? Promise.resolve({ items: state.routeShape })
+        : api('routeLines', { routeId: state.route.routeId }, { signal: controller.signal, timeout: 20000 }),
+      api('busLocations', { routeId: state.route.routeId }, { signal: controller.signal, fresh: true, timeout: 18000 }),
       api('arrival', {
         stationId: state.origin.stationId,
         routeId: state.route.routeId,
         staOrder: state.route.originStaOrder
-      })
+      }, { signal: controller.signal, fresh: true, timeout: 18000 })
     ]);
+    if (requestId !== state.liveRequestId) return;
 
     if (shapeResult.status === 'fulfilled') {
-      state.routeShape = (shapeResult.value.items || [])
+      const shape = (shapeResult.value.items || [])
         .map(normalizeRouteShapePoint)
-        .filter(point => Number.isFinite(number(point.x, NaN)) && Number.isFinite(number(point.y, NaN)))
+        .filter(point => stationPosition(point))
         .sort((a, b) => number(a.lineSeq) - number(b.lineSeq));
+      if (shape.length) state.routeShape = shape;
+    } else if (shapeResult.reason?.name !== 'AbortError') {
+      errors.push(shapeResult.reason);
     }
 
     if (locationResult.status === 'fulfilled') {
-      state.locations = (locationResult.value.items || [])
+      const nextLocations = (locationResult.value.items || [])
         .map(normalizeBusLocation)
-        .filter(bus => Number.isFinite(number(bus.stationSeq, NaN)) || bus.stationId);
-    } else {
-      state.locations = [];
+        .filter(bus => Number.isFinite(number(bus.stationSeq, NaN)) || bus.stationId || normalizeKoreaCoordinate(bus.x, bus.y));
+      if (nextLocations.length) {
+        state.locations = nextLocations;
+        state.lastLocationSuccessAt = Date.now();
+      } else if (!state.locations.length || Date.now() - state.lastLocationSuccessAt > 90000) {
+        state.locations = [];
+      }
+    } else if (locationResult.reason?.name !== 'AbortError') {
       errors.push(locationResult.reason);
+      if (Date.now() - state.lastLocationSuccessAt > 90000) state.locations = [];
     }
 
     if (arrivalResult.status === 'fulfilled') {
       state.arrival = arrivalResult.value.item || {};
-    } else {
-      state.arrival = {};
+    } else if (arrivalResult.reason?.name !== 'AbortError') {
       errors.push(arrivalResult.reason);
+      state.arrival ||= {};
     }
 
+    state.lastLiveUpdatedAt = Date.now();
     renderArrival();
+    renderLiveVehicleList();
     renderMap(fit || manual);
     checkForegroundAlarm();
 
-    if (locationResult.status === 'fulfilled') {
+    if (locationResult.status === 'fulfilled' || arrivalResult.status === 'fulfilled') {
       updateApiState();
       els.apiState.textContent = '실시간 연결됨';
       els.apiState.closest('.live-pill')?.classList.add('is-good');
@@ -509,29 +636,38 @@ async function loadLive(fit = false, { manual = false, silent = false } = {}) {
       updateApiState(errors[0]);
     }
 
+    if (els.liveUpdated) {
+      const time = new Date(state.lastLiveUpdatedAt).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      els.liveUpdated.textContent = `${time} 갱신 · 30초 자동 갱신`;
+    }
+
     if (manual && !silent) {
-      const actualCount = state.locations.length;
-      const arrivalCount = [arrivalMetadata(1), arrivalMetadata(2)].filter(Boolean).length;
-      toast(actualCount
-        ? `실시간 버스 ${actualCount}대와 노선을 새로 불러왔습니다.`
-        : arrivalCount
-          ? '위치 API 차량은 없지만 도착 예정 버스를 지도에 표시했습니다.'
-          : '현재 운행 차량 정보가 없습니다. 노선은 정상적으로 표시했습니다.', 3800);
+      const collections = busCollections();
+      toast(collections.approaching.length
+        ? `오는 버스 ${collections.approaching.length}대와 실제 노선을 갱신했습니다.`
+        : collections.all.length
+          ? `전체 차량 ${collections.all.length}대가 운행 중이지만 현재 정류장으로 오는 차량은 없습니다.`
+          : '도착 예정 차량이 아직 없습니다. 실제 노선은 지도에 표시했습니다.', 4200);
     }
   } catch (error) {
+    if (error?.name === 'AbortError') return;
     updateApiState(error);
     if (!silent) toast(error.message, 4200);
     if (state.routeStations.length) {
       renderArrival();
+      renderLiveVehicleList();
       renderMap(fit || manual);
     }
   } finally {
-    state.liveLoading = false;
-    if (els.refreshLive) {
-      els.refreshLive.disabled = false;
-      els.refreshLive.classList.remove('is-loading');
+    if (requestId === state.liveRequestId) {
+      state.liveLoading = false;
+      state.liveAbortController = null;
+      if (els.refreshLive) {
+        els.refreshLive.disabled = false;
+        els.refreshLive.classList.remove('is-loading');
+      }
+      if (els.refreshLiveLabel) els.refreshLiveLabel.textContent = '새로고침';
     }
-    if (els.refreshLiveLabel) els.refreshLiveLabel.textContent = '새로고침';
   }
 }
 
@@ -561,9 +697,11 @@ function renderArrival() {
 }
 
 function interpolateBusPosition(location) {
-  const directLat = number(location?.y ?? location?.gpsY ?? location?.latitude, NaN);
-  const directLng = number(location?.x ?? location?.gpsX ?? location?.longitude, NaN);
-  if (Number.isFinite(directLat) && Number.isFinite(directLng)) return [directLat, directLng];
+  const direct = normalizeKoreaCoordinate(
+    location?.x ?? location?.gpsX ?? location?.longitude,
+    location?.y ?? location?.gpsY ?? location?.latitude
+  );
+  if (direct) return [direct.lat, direct.lng];
 
   const ordered = [...state.routeStations].sort((a, b) => routeStationSequence(a) - routeStationSequence(b));
   const stationId = String(location?.stationId || '').trim();
@@ -593,9 +731,11 @@ function interpolateBusPosition(location) {
 }
 
 function stationPosition(stop) {
-  const lat = number(stop?.y, NaN);
-  const lng = number(stop?.x, NaN);
-  return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null;
+  const coordinate = normalizeKoreaCoordinate(
+    stop?.x ?? stop?.gpsX ?? stop?.longitude,
+    stop?.y ?? stop?.gpsY ?? stop?.latitude
+  );
+  return coordinate ? [coordinate.lat, coordinate.lng] : null;
 }
 
 
@@ -633,25 +773,39 @@ function mergeArrivalBus(bus, metadata) {
 
 function syntheticArrivalBus(metadata) {
   const locationNo = Math.max(0, number(metadata._locationNo, 0));
+  const originOrder = number(state.route?.originStaOrder, 1);
+  const arrivalName = normalizeName(metadata.stationName);
+  const matchingStops = arrivalName
+    ? state.routeStations.filter(stop => {
+      const stopName = normalizeName(stop.stationName);
+      return stopName && (stopName === arrivalName || stopName.includes(arrivalName) || arrivalName.includes(stopName));
+    })
+    : [];
+  const beforeOrigin = matchingStops
+    .filter(stop => routeStationSequence(stop) <= originOrder)
+    .sort((a, b) => routeStationSequence(b) - routeStationSequence(a));
+  const matched = beforeOrigin[0] || matchingStops[0];
   return {
     ...metadata,
     _synthetic: true,
-    stationSeq: Math.max(1, number(state.route?.originStaOrder, 1) - locationNo)
+    stationId: matched?.stationId || '',
+    stationSeq: matched ? routeStationSequence(matched) : Math.max(1, originOrder - locationNo)
   };
 }
 
 function busCollections() {
   const actual = (state.locations || []).map(bus => ({ ...bus, vehId: idText(bus.vehId) }));
   const actualByVehicle = new Map(actual.filter(bus => bus.vehId).map(bus => [bus.vehId, bus]));
-  const actualByPlate = new Map(actual.filter(bus => bus.plateNo).map(bus => [String(bus.plateNo), bus]));
+  const actualByPlate = new Map(actual.filter(bus => bus.plateNo).map(bus => [normalizePlate(bus.plateNo), bus]));
   const matchedIds = new Set();
   const matchedPlates = new Set();
   const exactArrivals = [1, 2].map(arrivalMetadata).filter(Boolean).map(metadata => {
+    const plateKey = normalizePlate(metadata.plateNo);
     const match = (metadata.vehId ? actualByVehicle.get(metadata.vehId) : null)
-      || (metadata.plateNo ? actualByPlate.get(String(metadata.plateNo)) : null);
+      || (plateKey ? actualByPlate.get(plateKey) : null);
     if (match) {
       if (metadata.vehId) matchedIds.add(metadata.vehId);
-      if (metadata.plateNo) matchedPlates.add(String(metadata.plateNo));
+      if (plateKey) matchedPlates.add(plateKey);
       return mergeArrivalBus(match, metadata);
     }
     return syntheticArrivalBus(metadata);
@@ -660,15 +814,14 @@ function busCollections() {
   const originOrder = number(state.route?.originStaOrder, 0);
   const otherApproaching = actual.filter(bus => {
     if (bus.vehId && matchedIds.has(bus.vehId)) return false;
-    if (bus.plateNo && matchedPlates.has(String(bus.plateNo))) return false;
-    return number(bus.stationSeq, 999999) <= originOrder;
+    if (bus.plateNo && matchedPlates.has(normalizePlate(bus.plateNo))) return false;
+    const seq = number(bus.stationSeq, NaN);
+    return Number.isFinite(seq) && seq <= originOrder;
   });
 
+  const uniqueKey = bus => bus.vehId || normalizePlate(bus.plateNo) || `synthetic:${bus._arrivalRank || ''}:${bus.stationSeq}`;
   const approaching = [...exactArrivals, ...otherApproaching]
-    .filter((bus, index, array) => {
-      const key = bus.vehId || `synthetic:${bus._arrivalRank || ''}:${bus.stationSeq}`;
-      return array.findIndex(item => (item.vehId || `synthetic:${item._arrivalRank || ''}:${item.stationSeq}`) === key) === index;
-    })
+    .filter((bus, index, array) => array.findIndex(item => uniqueKey(item) === uniqueKey(bus)) === index)
     .sort((a, b) => {
       if (a._arrivalRank && b._arrivalRank) return a._arrivalRank - b._arrivalRank;
       if (a._arrivalRank) return -1;
@@ -677,9 +830,47 @@ function busCollections() {
     });
 
   const exactByVehicle = new Map(exactArrivals.filter(bus => bus.vehId && !bus._synthetic).map(bus => [bus.vehId, bus]));
-  const all = actual.map(bus => exactByVehicle.get(bus.vehId) || bus);
+  const exactByPlate = new Map(exactArrivals.filter(bus => bus.plateNo && !bus._synthetic).map(bus => [normalizePlate(bus.plateNo), bus]));
+  const all = actual.map(bus => exactByVehicle.get(bus.vehId) || exactByPlate.get(normalizePlate(bus.plateNo)) || bus);
   exactArrivals.filter(bus => bus._synthetic).forEach(bus => all.push(bus));
-  return { approaching, all };
+  const dedupedAll = all.filter((bus, index, array) => array.findIndex(item => uniqueKey(item) === uniqueKey(bus)) === index);
+  return { approaching, all: dedupedAll };
+}
+
+
+function renderLiveVehicleList() {
+  if (!els.liveVehicles || !state.route) return;
+  const collections = busCollections();
+  const incomingKeys = new Set(collections.approaching.map(bus => bus.vehId || normalizePlate(bus.plateNo) || `rank:${bus._arrivalRank}`));
+  const ordered = [...collections.all].sort((a, b) => {
+    const aIncoming = incomingKeys.has(a.vehId || normalizePlate(a.plateNo) || `rank:${a._arrivalRank}`);
+    const bIncoming = incomingKeys.has(b.vehId || normalizePlate(b.plateNo) || `rank:${b._arrivalRank}`);
+    if (aIncoming !== bIncoming) return aIncoming ? -1 : 1;
+    return number(b.stationSeq) - number(a.stationSeq);
+  });
+
+  if (!ordered.length) {
+    els.liveVehicles.innerHTML = '<div class="empty">현재 운행 차량이 조회되지 않았습니다. 노선은 지도에 계속 표시됩니다.</div>';
+    return;
+  }
+
+  els.liveVehicles.innerHTML = ordered.map((bus, index) => {
+    const key = bus.vehId || normalizePlate(bus.plateNo) || `rank:${bus._arrivalRank}`;
+    const incoming = incomingKeys.has(key);
+    const status = busMapStatus(bus);
+    const vehicle = bus.plateNo || (bus.vehId ? `차량 ${bus.vehId}` : '차량번호 확인 중');
+    return `<button type="button" class="live-vehicle-row${incoming ? ' incoming' : ''}" data-live-vehicle="${index}">
+      <span class="live-route-badge">${esc(state.route.routeName)}</span>
+      <span class="live-vehicle-copy"><strong>${esc(vehicle)}</strong><small>${esc(status.label)}</small></span>
+      <span class="live-vehicle-state">${incoming ? (bus._arrivalRank ? `${bus._arrivalRank}번째` : '오는 버스') : '운행 중'}</span>
+    </button>`;
+  }).join('');
+
+  els.liveVehicles.querySelectorAll('[data-live-vehicle]').forEach(button => button.addEventListener('click', () => {
+    const bus = ordered[Number(button.dataset.liveVehicle)];
+    const position = interpolateBusPosition(bus);
+    if (position && state.map) state.map.setView(position, Math.max(state.map.getZoom(), 16), { animate: true });
+  }));
 }
 
 function ensureMap() {
@@ -727,23 +918,39 @@ function drawPolyline(stops, options) {
   return latlngs;
 }
 
+function splitRoutePath(latlngs, maxJumpMeters = 3500) {
+  const segments = [];
+  let current = [];
+  latlngs.forEach(point => {
+    const previous = current[current.length - 1];
+    if (previous && distanceMeters(previous[0], previous[1], point[0], point[1]) > maxJumpMeters) {
+      if (current.length > 1) segments.push(current);
+      current = [];
+    }
+    current.push(point);
+  });
+  if (current.length > 1) segments.push(current);
+  return segments;
+}
+
+
 function renderMap(fit = false) {
   const map = ensureMap();
   state.routeLayer.clearLayers();
   state.markerLayer.clearLayers();
 
   const ordered = [...state.routeStations].sort((a, b) => number(a.stationSeq) - number(b.stationSeq));
-  const routeShapeLatlngs = (state.routeShape || []).map(point => {
-    const lat = number(point.y, NaN);
-    const lng = number(point.x, NaN);
-    return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null;
-  }).filter(Boolean);
-  if (routeShapeLatlngs.length > 1) {
-    L.polyline(routeShapeLatlngs, { color: '#062d66', weight: 9, opacity: .82, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
-    L.polyline(routeShapeLatlngs, { color: '#36b9ff', weight: 4, opacity: .82, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
-  }
-  const stationRouteLatlngs = drawPolyline(ordered, { color: '#123f78', weight: routeShapeLatlngs.length ? 3 : 7, opacity: routeShapeLatlngs.length ? .24 : .78, lineCap: 'round', lineJoin: 'round' });
-  const allLatlngs = routeShapeLatlngs.length ? routeShapeLatlngs : stationRouteLatlngs;
+  const routeShapeLatlngs = (state.routeShape || []).map(stationPosition).filter(Boolean);
+  const routeShapeSegments = splitRoutePath(routeShapeLatlngs);
+  routeShapeSegments.forEach(segment => {
+    L.polyline(segment, { color: '#062d66', weight: 10, opacity: .84, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+    L.polyline(segment, { color: '#36b9ff', weight: 4, opacity: .92, lineCap: 'round', lineJoin: 'round' }).addTo(state.routeLayer);
+  });
+  const stationRouteLatlngs = drawPolyline(ordered, {
+    color: '#123f78', weight: routeShapeSegments.length ? 3 : 8,
+    opacity: routeShapeSegments.length ? .30 : .84, lineCap: 'round', lineJoin: 'round'
+  });
+  const allLatlngs = routeShapeSegments.length ? routeShapeSegments.flat() : stationRouteLatlngs;
   const approachStops = ordered.filter(stop => number(stop.stationSeq) <= state.route.originStaOrder);
   const journeyStops = ordered.filter(stop => {
     const seq = number(stop.stationSeq);
@@ -794,7 +1001,7 @@ function renderMap(fit = false) {
     const status = busMapStatus(bus);
     const icon = L.divIcon({
       className: '',
-      html: `<div class="bus-marker ${status.className}"><span class="bus-route-number">${esc(state.route.routeName)}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17h12M7 4h10a3 3 0 0 1 3 3v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3Zm-1 9h12M8 8h8M7 21v-3m10 3v-3"/></svg><small>${esc(String(bus.plateNo || '').slice(-4))}</small></div>`,
+      html: `<div class="bus-marker ${status.className}"><span class="bus-route-number">${esc(state.route.routeName)}</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 17h12M7 4h10a3 3 0 0 1 3 3v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3Zm-1 9h12M8 8h8M7 21v-3m10 3v-3"/></svg><small>${esc(String(bus.plateNo || bus.vehId || '').slice(-4))}</small></div>`,
       iconSize: bus._arrivalRank ? [68, 52] : [62, 48],
       iconAnchor: bus._arrivalRank ? [34, 26] : [31, 24]
     });
@@ -809,7 +1016,7 @@ function renderMap(fit = false) {
     const userPos = [state.userLocation.lat, state.userLocation.lng];
     if (state.userLocation.accuracy > 0) {
       L.circle(userPos, {
-        radius: Math.min(Math.max(state.userLocation.accuracy, 20), 250),
+        radius: Math.min(Math.max(state.userLocation.accuracy, 20), 300),
         color: '#0f86ff', weight: 1, opacity: .45, fillColor: '#28a5ff', fillOpacity: .09
       }).addTo(state.markerLayer);
     }
@@ -823,24 +1030,23 @@ function renderMap(fit = false) {
 
   const approachingCount = collections.approaching.length;
   const allCount = collections.all.length;
-  els.busCount.textContent = `전체 ${allCount}대 · 접근 ${approachingCount}대`;
+  els.busCount.textContent = `오는 버스 ${approachingCount}대 · 전체 ${allCount}대`;
   if (state.vehicleScope === 'approaching') {
     els.mapNote.textContent = approachingCount
-      ? '탑승 정류장으로 오는 차량만 표시합니다. 1·2 표시 차량은 도착정보 API가 지정한 실제 첫 번째·두 번째 도착 버스입니다.'
-      : '현재 탑승 정류장으로 접근 중인 차량이 없습니다. “전체 차량”을 누르면 이미 지나간 차량도 확인할 수 있습니다.';
+      ? '탑승 정류장으로 오는 차량을 표시합니다. 각 마커에는 노선번호와 차량번호 끝자리가 함께 표시됩니다.'
+      : '도착정보와 위치정보에서 현재 탑승 정류장으로 오는 차량이 확인되지 않습니다. “전체 차량”에서 운행 위치를 볼 수 있습니다.';
   } else {
     els.mapNote.textContent = allCount
-      ? '선택한 노선 전체와 운행 중인 모든 차량을 표시합니다. 각 차량 위에 버스 번호가 함께 표시됩니다.'
-      : '선택한 노선은 표시됐지만 현재 위치 API에 운행 차량이 없습니다. 잠시 후 새로고침해 주세요.';
+      ? '선택한 실제 노선 전체와 운행 차량을 모두 표시합니다. 탑승 정류장을 지난 차량도 포함됩니다.'
+      : '선택한 실제 노선은 표시됐지만 현재 운행 차량 정보가 없습니다. 잠시 후 새로고침해 주세요.';
   }
 
   if (fit) {
     let fitLatlngs = state.mapScope === 'journey' && journeyLatlngs.length ? journeyLatlngs : allLatlngs;
-    if (state.vehicleScope === 'approaching' && state.mapScope === 'full' && approachLatlngs.length) {
-      fitLatlngs = [...approachLatlngs, ...visibleBusPositions];
-    }
-    if (state.userLocation) fitLatlngs = [...fitLatlngs, [state.userLocation.lat, state.userLocation.lng]];
-    if (fitLatlngs.length > 1) map.fitBounds(fitLatlngs, { padding: [32, 32], maxZoom: 16 });
+    if (state.vehicleScope === 'approaching' && approachLatlngs.length) fitLatlngs = [...approachLatlngs, ...visibleBusPositions];
+    if (!fitLatlngs.length) fitLatlngs = stationRouteLatlngs;
+    if (state.userLocation && !state.routeShape.length) fitLatlngs = [...fitLatlngs, [state.userLocation.lat, state.userLocation.lng]];
+    if (fitLatlngs.length > 1) map.fitBounds(fitLatlngs, { padding: [34, 34], maxZoom: 16 });
     else if (fitLatlngs.length === 1) map.setView(fitLatlngs[0], 15);
   }
   setTimeout(() => map.invalidateSize(), 100);
@@ -918,7 +1124,7 @@ async function initFirebase() {
   try {
     const configResponse = await fetch('/api/config', { cache: 'no-store' });
     state.firebaseConfig = await configResponse.json();
-    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.5.0', { scope: '/' });
+    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.6.0', { scope: '/' });
 
     if (!state.firebaseConfig.backgroundPushConfigured) {
       els.pushState.textContent = '화면 켤 때만';

@@ -100,6 +100,7 @@
               </button>
             </div>
             <div class="suggestions" id="originSuggestions"></div>
+            <div class="nearby-status" id="nearbyStatus" aria-live="polite">내 위치 버튼을 누르면 정확한 위치를 확인한 뒤 최대 1.1km까지 검색합니다.</div>
             <div class="selected-stop" id="originSelected">정류장을 검색해 실제 탑승 방향을 선택하세요.</div>
           </div>
 
@@ -142,16 +143,18 @@
 
         <div class="chosen-route" id="chosenRoute"></div>
         <div class="arrival-grid" id="arrivalGrid"></div>
+        <div class="live-vehicle-heading"><strong>운행 차량</strong><span id="liveUpdated">실시간 정보 대기 중</span></div>
+        <div class="live-vehicles" id="liveVehicles"><div class="empty">버스를 선택하면 오는 차량과 전체 운행 차량을 표시합니다.</div></div>
         <div class="map-frame">
           <div id="map" aria-label="실시간 버스 위치 지도"></div>
           <div class="map-control-stack">
             <div class="map-scope-control" role="group" aria-label="지도 표시 범위">
-              <button type="button" class="active" data-map-scope="full">접근 구간</button>
+              <button type="button" class="active" data-map-scope="full">전체 노선</button>
               <button type="button" data-map-scope="journey">탑승 구간</button>
             </div>
             <div class="map-vehicle-control" role="group" aria-label="버스 표시 기준">
-              <button type="button" data-vehicle-scope="approaching">오는 버스</button>
-              <button type="button" class="active" data-vehicle-scope="all">전체 차량</button>
+              <button type="button" class="active" data-vehicle-scope="approaching">오는 버스</button>
+              <button type="button" data-vehicle-scope="all">전체 차량</button>
             </div>
           </div>
           <div class="map-live-chip"><span class="pulse"></span><span id="busCount">운행 차량 확인 중</span></div>
@@ -161,7 +164,7 @@
           <span><i class="legend-line journey"></i>탑승 이동 구간</span>
           <span><i class="legend-bus"></i>탑승 정류장으로 오는 버스</span>
         </div>
-        <p class="map-note" id="mapNote">선택한 노선 전체와 현재 운행 중인 모든 차량을 버스 번호와 함께 표시합니다.</p>
+        <p class="map-note" id="mapNote">선택한 실제 노선 전체와 탑승 정류장으로 오는 차량을 버스 번호와 함께 표시합니다.</p>
       </section>
 
       <section class="card alert-card hidden" id="alertSection">
@@ -266,6 +269,6 @@
   <audio id="alarmAudio" preload="auto"></audio>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script type="module" src="/app.js?v=1.5.0"></script>
+  <script type="module" src="/app.js?v=1.6.0"></script>
 </body>
 </html>
