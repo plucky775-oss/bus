@@ -7,6 +7,14 @@ const ENDPOINTS = {
     apiName: '경기도_정류소 조회',
     keyEnv: 'GBIS_STATION_SERVICE_KEY'
   },
+  stationAround: {
+    url: 'https://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2',
+    params: ['x', 'y'],
+    dataKey: 'busStationList',
+    cache: 30,
+    apiName: '경기도_정류소 조회',
+    keyEnv: 'GBIS_STATION_SERVICE_KEY'
+  },
   stationRoutes: {
     url: 'https://apis.data.go.kr/6410000/busstationservice/v2/getBusStationViaRouteListv2',
     params: ['stationId'],
