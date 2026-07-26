@@ -53,8 +53,25 @@ async function api(action, params = {}) {
   Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
   const response = await fetch(url, { cache: 'no-store' });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.ok) throw new Error(data.message || '버스정보를 가져오지 못했습니다.');
+  if (!response.ok || !data.ok) {
+    const error = new Error(data.message || '버스정보를 가져오지 못했습니다.');
+    error.code = data.code || '';
+    error.requiredApi = data.requiredApi || '';
+    throw error;
+  }
   return data;
+}
+
+function updateApiState(error) {
+  if (!error) {
+    els.apiState.textContent = 'API 연결됨';
+    return;
+  }
+  if (error.code === 'MISSING_SERVICE_KEY') els.apiState.textContent = 'API 키 필요';
+  else if (error.code === 'API_ACCESS_DENIED') els.apiState.textContent = 'API 권한 필요';
+  else if (error.code === 'INVALID_SERVICE_KEY') els.apiState.textContent = 'API 키 확인';
+  else if (error.code === 'API_QUOTA_EXCEEDED') els.apiState.textContent = '호출량 초과';
+  else els.apiState.textContent = '연결 오류';
 }
 
 function stationLabel(station) {
@@ -86,7 +103,7 @@ async function searchStations(kind) {
     });
   } catch (error) {
     listEl.innerHTML = `<div class="empty error">${esc(error.message)}</div>`;
-    els.apiState.textContent = 'API 설정 필요';
+    updateApiState(error);
   }
 }
 
@@ -196,7 +213,7 @@ async function loadLive(fit = false) {
     checkForegroundAlarm();
     els.apiState.textContent = '실시간 연결됨';
   } catch (error) {
-    els.apiState.textContent = '연결 오류';
+    updateApiState(error);
     toast(error.message);
   }
 }
@@ -483,9 +500,9 @@ async function boot() {
   initFirebase();
   try {
     await api('stationSearch', { keyword: '호계현대홈타운.e편한세상아파트' });
-    els.apiState.textContent = 'API 연결됨';
+    updateApiState();
   } catch (error) {
-    els.apiState.textContent = error.message.includes('GBIS_SERVICE_KEY') ? 'API 키 필요' : '연결 오류';
+    updateApiState(error);
   }
   setTimeout(() => searchStations('origin'), 250);
   setTimeout(() => searchStations('destination'), 500);
