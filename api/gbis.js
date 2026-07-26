@@ -9,8 +9,10 @@ const ENDPOINTS = {
   },
   stationAround: {
     url: 'https://apis.data.go.kr/6410000/busstationservice/v2/getBusStationAroundListv2',
+    fallbackUrls: ['https://apis.data.go.kr/6410000/busstationservice/getBusStationAroundList'],
     params: ['x', 'y'],
     dataKey: 'busStationList',
+    dataKeys: ['busStationList', 'busStationAroundList'],
     cache: 30,
     apiName: '경기도_정류소 조회',
     keyEnv: 'GBIS_STATION_SERVICE_KEY'
@@ -135,6 +137,10 @@ function xmlBlockToObject(block) {
   return result;
 }
 
+function responseDataKeys(spec) {
+  return [...new Set([spec.dataKey, ...(spec.dataKeys || [])].filter(Boolean))];
+}
+
 function parseXmlResponse(text, spec) {
   const header = {
     queryTime: readXmlTag(text, 'queryTime'),
@@ -146,9 +152,12 @@ function parseXmlResponse(text, spec) {
   };
 
   const values = [];
-  const itemPattern = new RegExp(`<${spec.dataKey}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${spec.dataKey}>`, 'gi');
-  let match;
-  while ((match = itemPattern.exec(text)) !== null) values.push(xmlBlockToObject(match[1]));
+  for (const dataKey of responseDataKeys(spec)) {
+    const itemPattern = new RegExp(`<${dataKey}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${dataKey}>`, 'gi');
+    let match;
+    while ((match = itemPattern.exec(text)) !== null) values.push(xmlBlockToObject(match[1]));
+    if (values.length) break;
+  }
 
   return {
     format: 'xml',
@@ -157,7 +166,7 @@ function parseXmlResponse(text, spec) {
   };
 }
 
-function extractJsonPayload(json, dataKey) {
+function extractJsonPayload(json, spec) {
   const findDeep = (value, key, depth = 0, seen = new Set()) => {
     if (!value || typeof value !== 'object' || depth > 10 || seen.has(value)) return undefined;
     seen.add(value);
@@ -171,8 +180,12 @@ function extractJsonPayload(json, dataKey) {
   const response = json?.response || json;
   const commonHeader = response?.comMsgHeader || json?.comMsgHeader || json?.OpenAPI_ServiceResponse?.cmmMsgHeader || findDeep(json, 'comMsgHeader') || {};
   const header = response?.msgHeader || response?.header || json?.msgHeader || findDeep(json, 'msgHeader') || {};
-  let value = response?.msgBody?.[dataKey] ?? response?.body?.[dataKey] ?? json?.msgBody?.[dataKey] ?? response?.[dataKey] ?? json?.[dataKey];
-  if (value === undefined) value = findDeep(json, dataKey);
+  let value;
+  for (const dataKey of responseDataKeys(spec)) {
+    value = response?.msgBody?.[dataKey] ?? response?.body?.[dataKey] ?? json?.msgBody?.[dataKey] ?? response?.[dataKey] ?? json?.[dataKey];
+    if (value === undefined) value = findDeep(json, dataKey);
+    if (value !== undefined) break;
+  }
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     value = value.item ?? value.items?.item ?? value.items ?? value;
   }
@@ -199,7 +212,7 @@ function parseUpstream(text, contentType, spec) {
 
   if (contentType.includes('json') || trimmed.startsWith('{') || trimmed.startsWith('[')) {
     try {
-      return extractJsonPayload(JSON.parse(trimmed), spec.dataKey);
+      return extractJsonPayload(JSON.parse(trimmed), spec);
     } catch {
       // 일부 공공데이터 오류 응답은 JSON Content-Type으로 XML/HTML을 돌려준다.
     }
@@ -289,65 +302,88 @@ export default async function handler(req, res) {
     }
   }
 
-  const url = new URL(spec.url);
-  url.searchParams.set('format', 'json');
-  url.searchParams.set('serviceKey', serviceKey);
-  for (const name of spec.params) url.searchParams.set(name, String(req.query[name]).trim());
+  const candidateUrls = [spec.url, ...(spec.fallbackUrls || [])];
 
   try {
-    const upstream = await fetch(url, {
-      headers: {
-        Accept: 'application/json, application/xml;q=0.9, text/plain;q=0.5',
-        'User-Agent': 'hogye-bus-alert/1.9'
-      },
-      signal: AbortSignal.timeout(12000)
-    });
-    const text = await upstream.text();
-    const parsed = parseUpstream(text, upstream.headers.get('content-type') || '', spec);
-    const resultCode = String(parsed.header?.resultCode ?? (upstream.ok ? '0' : upstream.status));
-    const resultMessage = parsed.header?.resultMessage || (upstream.ok ? '정상 처리' : '공공 API 요청 실패');
+    let lastEmpty = null;
+    for (let candidateIndex = 0; candidateIndex < candidateUrls.length; candidateIndex += 1) {
+      const url = new URL(candidateUrls[candidateIndex]);
+      url.searchParams.set('format', 'json');
+      url.searchParams.set('serviceKey', serviceKey);
+      for (const name of spec.params) url.searchParams.set(name, String(req.query[name]).trim());
 
-    // GBIS 결과코드 4는 오류가 아니라 검색 결과 없음이다.
-    if (upstream.ok && NO_RESULT_CODES.has(resultCode)) {
-      res.setHeader('Cache-Control', spec.cache ? `s-maxage=${spec.cache}, stale-while-revalidate=600` : 'no-store');
+      const upstream = await fetch(url, {
+        headers: {
+          Accept: 'application/json, application/xml;q=0.9, text/plain;q=0.5',
+          'User-Agent': 'hogye-bus-alert/2.0'
+        },
+        signal: AbortSignal.timeout(12000)
+      });
+      const text = await upstream.text();
+      const parsed = parseUpstream(text, upstream.headers.get('content-type') || '', spec);
+      const resultCode = String(parsed.header?.resultCode ?? (upstream.ok ? '0' : upstream.status));
+      const resultMessage = parsed.header?.resultMessage || (upstream.ok ? '정상 처리' : '공공 API 요청 실패');
+      const values = spec.single ? (parsed.value ? [parsed.value] : []) : asArray(parsed.value);
+      const hasFallback = candidateIndex < candidateUrls.length - 1;
+
+      // GBIS 결과코드 4는 오류가 아니라 검색 결과 없음이다. 주변정류소는 구형 응답 태그/주소도 한 번 더 확인한다.
+      if (upstream.ok && (NO_RESULT_CODES.has(resultCode) || (SUCCESS_CODES.has(resultCode) && !values.length))) {
+        lastEmpty = { parsed, resultCode, resultMessage };
+        if (hasFallback) continue;
+        res.setHeader('Cache-Control', spec.cache ? `s-maxage=${spec.cache}, stale-while-revalidate=120` : 'no-store');
+        return res.status(200).json({
+          ok: true,
+          queryTime: parsed.header?.queryTime || null,
+          resultCode,
+          message: resultMessage,
+          sourceFormat: parsed.format,
+          sourceEndpoint: candidateIndex === 0 ? 'v2' : 'legacy',
+          ...(spec.single ? { item: null } : { items: [] })
+        });
+      }
+
+      if (!upstream.ok || !SUCCESS_CODES.has(resultCode)) {
+        const failure = classifyFailure({
+          upstreamStatus: upstream.status,
+          resultCode,
+          resultMessage,
+          rawText: text,
+          spec
+        });
+        // 주변정류소 구형 주소는 v2가 404/일시 오류일 때만 보조 사용한다. 인증/권한 오류는 즉시 돌려준다.
+        if (hasFallback && ['UPSTREAM_API_ERROR'].includes(failure.code)) continue;
+        res.setHeader('Cache-Control', 'no-store');
+        return res.status(failure.status).json({
+          ok: false,
+          code: failure.code,
+          action,
+          requiredApi: spec.apiName,
+          resultCode,
+          message: failure.message,
+          upstreamStatus: upstream.status
+        });
+      }
+
+      res.setHeader('Cache-Control', spec.cache ? `s-maxage=${spec.cache}, stale-while-revalidate=120` : 'no-store');
       return res.status(200).json({
         ok: true,
         queryTime: parsed.header?.queryTime || null,
         resultCode,
         message: resultMessage,
         sourceFormat: parsed.format,
-        ...(spec.single ? { item: null } : { items: [] })
+        sourceEndpoint: candidateIndex === 0 ? 'v2' : 'legacy',
+        ...(spec.single ? { item: parsed.value || null } : { items: values })
       });
     }
 
-    if (!upstream.ok || !SUCCESS_CODES.has(resultCode)) {
-      const failure = classifyFailure({
-        upstreamStatus: upstream.status,
-        resultCode,
-        resultMessage,
-        rawText: text,
-        spec
-      });
-      res.setHeader('Cache-Control', 'no-store');
-      return res.status(failure.status).json({
-        ok: false,
-        code: failure.code,
-        action,
-        requiredApi: spec.apiName,
-        resultCode,
-        message: failure.message,
-        upstreamStatus: upstream.status
-      });
-    }
-
-    res.setHeader('Cache-Control', spec.cache ? `s-maxage=${spec.cache}, stale-while-revalidate=600` : 'no-store');
+    const parsed = lastEmpty?.parsed || { header: {}, format: 'empty' };
     return res.status(200).json({
       ok: true,
       queryTime: parsed.header?.queryTime || null,
-      resultCode,
-      message: resultMessage,
+      resultCode: lastEmpty?.resultCode || '4',
+      message: lastEmpty?.resultMessage || '결과가 존재하지 않습니다.',
       sourceFormat: parsed.format,
-      ...(spec.single ? { item: parsed.value || null } : { items: asArray(parsed.value) })
+      ...(spec.single ? { item: null } : { items: [] })
     });
   } catch (error) {
     const timedOut = error?.name === 'TimeoutError' || error?.name === 'AbortError';
