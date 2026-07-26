@@ -39,6 +39,14 @@ const ENDPOINTS = {
     apiName: '경기도_버스노선 조회',
     keyEnv: 'GBIS_ROUTE_SERVICE_KEY'
   },
+  routeLines: {
+    url: 'https://apis.data.go.kr/6410000/busrouteservice/v2/getBusRouteLineListv2',
+    params: ['routeId'],
+    dataKey: 'busRouteLineList',
+    cache: 300,
+    apiName: '경기도_버스노선 조회',
+    keyEnv: 'GBIS_ROUTE_SERVICE_KEY'
+  },
   busLocations: {
     url: 'https://apis.data.go.kr/6410000/buslocationservice/v2/getBusLocationListv2',
     params: ['routeId'],
