@@ -1,0 +1,15 @@
+{
+  "name": "우리 버스 알림",
+  "short_name": "버스알림",
+  "description": "호계 e편한세상에서 평촌고·평촌학원가로 가는 버스 실시간 위치와 3정거장 전 알림",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f4f7fb",
+  "theme_color": "#1859d9",
+  "lang": "ko-KR",
+  "orientation": "portrait-primary",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

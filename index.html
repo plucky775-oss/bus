@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#1859d9" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="버스알림" />
+  <title>우리 버스 알림</title>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <link rel="preconnect" href="https://unpkg.com" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">호계 e편한세상 출발</p>
+        <h1>우리 버스 알림</h1>
+        <p class="hero-copy">평촌고·평촌학원가 버스를 실시간으로 보고, 3정거장 전에 알림을 받으세요.</p>
+      </div>
+      <div class="live-pill"><span class="pulse"></span><span id="apiState">연결 확인 중</span></div>
+    </header>
+
+    <main>
+      <section class="card route-card">
+        <div class="section-title-row">
+          <div>
+            <span class="step">1</span>
+            <h2>이동 경로 선택</h2>
+          </div>
+          <button class="icon-button" id="swapStops" aria-label="출발·도착 바꾸기">⇅</button>
+        </div>
+
+        <div class="preset-row" role="group" aria-label="목적지 빠른 선택">
+          <button class="preset active" data-destination="평촌고">🏫 평촌고</button>
+          <button class="preset" data-destination="평촌학원가.먹자거리">📚 평촌학원가</button>
+        </div>
+
+        <div class="stop-picker">
+          <label for="originInput">타는 정류장</label>
+          <div class="search-line">
+            <input id="originInput" value="호계현대홈타운.e편한세상아파트" autocomplete="off" />
+            <button class="secondary" id="originSearch">검색</button>
+          </div>
+          <div class="suggestions" id="originSuggestions"></div>
+          <div class="selected-stop" id="originSelected">정류장을 검색해 방향을 선택하세요.</div>
+        </div>
+
+        <div class="stop-picker">
+          <label for="destinationInput">내릴 정류장</label>
+          <div class="search-line">
+            <input id="destinationInput" value="평촌고" autocomplete="off" />
+            <button class="secondary" id="destinationSearch">검색</button>
+          </div>
+          <div class="suggestions" id="destinationSuggestions"></div>
+          <div class="selected-stop" id="destinationSelected">목적지 정류장을 선택하세요.</div>
+        </div>
+
+        <button class="primary full" id="findRoutes">직행 버스 찾기</button>
+        <div class="route-results" id="routeResults"></div>
+      </section>
+
+      <section class="card hidden" id="liveSection">
+        <div class="section-title-row">
+          <div>
+            <span class="step">2</span>
+            <h2>실시간 버스</h2>
+          </div>
+          <button class="secondary compact" id="refreshLive">새로고침</button>
+        </div>
+
+        <div class="chosen-route" id="chosenRoute"></div>
+        <div class="arrival-grid" id="arrivalGrid"></div>
+        <div id="map" aria-label="실시간 버스 위치 지도"></div>
+        <p class="map-note">버스 위치는 경기도 버스정보의 현재 정류장 순번을 기준으로 표시됩니다.</p>
+      </section>
+
+      <section class="card hidden" id="alertSection">
+        <div class="section-title-row">
+          <div>
+            <span class="step">3</span>
+            <h2>알림 설정</h2>
+          </div>
+          <span class="status-badge" id="pushState">미설정</span>
+        </div>
+
+        <div class="form-grid two">
+          <label>시작 시간<input type="time" id="startTime" value="15:00" /></label>
+          <label>종료 시간<input type="time" id="endTime" value="23:00" /></label>
+        </div>
+
+        <div class="field-block">
+          <span class="field-label">알림 요일</span>
+          <div class="day-row" id="dayRow">
+            <button data-day="1" class="day active">월</button>
+            <button data-day="2" class="day active">화</button>
+            <button data-day="3" class="day active">수</button>
+            <button data-day="4" class="day active">목</button>
+            <button data-day="5" class="day active">금</button>
+            <button data-day="6" class="day">토</button>
+            <button data-day="0" class="day">일</button>
+          </div>
+        </div>
+
+        <div class="form-grid two">
+          <label>몇 정거장 전
+            <select id="leadStops">
+              <option value="1">1정거장 전</option>
+              <option value="2">2정거장 전</option>
+              <option value="3" selected>3정거장 전</option>
+              <option value="4">4정거장 전</option>
+              <option value="5">5정거장 전</option>
+            </select>
+          </label>
+          <label>알림 방식
+            <select id="alertMode">
+              <option value="push">소리·진동·푸시</option>
+              <option value="pushOnly">푸시만</option>
+            </select>
+          </label>
+        </div>
+
+        <label class="toggle-line">
+          <input type="checkbox" id="alertEnabled" checked />
+          <span>설정한 시간대에 자동 감시</span>
+        </label>
+
+        <button class="primary full" id="saveAlert">알림 권한 허용하고 저장</button>
+        <button class="secondary full" id="testAlert">알림 소리 테스트</button>
+        <div class="info-box" id="alertInfo">앱을 홈 화면에 설치하고 알림을 허용하면 화면이 꺼진 상태에서도 푸시 알림을 받을 수 있습니다.</div>
+      </section>
+
+      <section class="card help-card">
+        <h2>사용 순서</h2>
+        <ol>
+          <li>같은 이름의 정류장 중 실제 탑승 방향을 선택합니다.</li>
+          <li>직행 노선을 고르면 실시간 위치와 도착정보가 표시됩니다.</li>
+          <li>시간과 요일을 정하고 알림을 저장합니다.</li>
+        </ol>
+      </section>
+    </main>
+
+    <nav class="bottom-nav" aria-label="빠른 이동">
+      <button data-scroll="route-card" class="active">🚌<span>노선</span></button>
+      <button data-scroll="liveSection">📍<span>실시간</span></button>
+      <button data-scroll="alertSection">🔔<span>알림</span></button>
+    </nav>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+  <audio id="alarmAudio" preload="auto"></audio>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
