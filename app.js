@@ -12,12 +12,14 @@ const state = {
   routeShape: [],
   locations: [],
   arrival: null,
+  arrivalList: [],
+  arrivalResolvedBy: 'none',
   map: null,
   routeLayer: null,
   markerLayer: null,
   userLocation: null,
   mapScope: 'full',
-  vehicleScope: 'approaching',
+  vehicleScope: 'all',
   poller: null,
   firebase: null,
   firebaseConfig: null,
@@ -103,7 +105,9 @@ function normalizeRouteStation(item) {
     ...coordinateFields(item),
     stationId: String(item?.stationId ?? item?.stationID ?? '').trim(),
     stationSeq: routeStationSequence(item),
-    stationName: item?.stationName || item?.stationNm || ''
+    stationName: item?.stationName || item?.stationNm || '',
+    turnSeq: number(item?.turnSeq, NaN),
+    turnYn: String(item?.turnYn || '').trim().toUpperCase()
   };
 }
 
@@ -133,13 +137,17 @@ function normalizeBusLocation(item) {
   };
 }
 
-function reconcileRouteOrders() {
+function reconcileRouteOrders(preferredOriginSeq = NaN) {
   const stations = state.routeStations || [];
   if (!stations.length || !state.route || !state.origin || !state.destination) return;
 
-  const originMatches = stations.filter(stop => sameId(stop.stationId, state.origin.stationId));
+  const allOriginMatches = stations.filter(stop => sameId(stop.stationId, state.origin.stationId));
   const destinationMatches = stations.filter(stop => sameId(stop.stationId, state.destination.stationId));
-  const previousOrigin = number(state.route.originStaOrder, 0);
+  const forcedOrigins = Number.isFinite(preferredOriginSeq)
+    ? allOriginMatches.filter(stop => routeStationSequence(stop) === preferredOriginSeq)
+    : [];
+  const originMatches = forcedOrigins.length ? forcedOrigins : allOriginMatches;
+  const previousOrigin = Number.isFinite(preferredOriginSeq) ? preferredOriginSeq : number(state.route.originStaOrder, 0);
   const previousDestination = number(state.route.destinationStaOrder, 0);
   const pairs = [];
 
@@ -147,7 +155,7 @@ function reconcileRouteOrders() {
     const originSeq = routeStationSequence(originStop);
     const destinationSeq = routeStationSequence(destinationStop);
     if (!Number.isFinite(originSeq) || !Number.isFinite(destinationSeq) || destinationSeq <= originSeq) return;
-    const score = Math.abs(originSeq - previousOrigin) + Math.abs(destinationSeq - previousDestination)
+    const score = Math.abs(originSeq - previousOrigin) * 5 + Math.abs(destinationSeq - previousDestination)
       + Math.max(0, destinationSeq - originSeq) * .001;
     pairs.push({ originSeq, destinationSeq, score });
   }));
@@ -156,19 +164,90 @@ function reconcileRouteOrders() {
     pairs.sort((a, b) => a.score - b.score);
     state.route.originStaOrder = pairs[0].originSeq;
     state.route.destinationStaOrder = pairs[0].destinationSeq;
-    return;
+  } else {
+    // 일부 순환·분기 노선은 동일 정류소가 중복되므로 이름까지 보조 비교한다.
+    const nameMatch = (station, selected) => String(station.stationName || '').replace(/\s/g, '')
+      === String(selected.stationName || '').replace(/\s/g, '');
+    const fallbackOrigins = stations.filter(stop => nameMatch(stop, state.origin));
+    const fallbackOrigin = (Number.isFinite(preferredOriginSeq)
+      ? fallbackOrigins.find(stop => routeStationSequence(stop) === preferredOriginSeq)
+      : null) || fallbackOrigins[0];
+    const fallbackDestination = stations.find(stop => nameMatch(stop, state.destination)
+      && routeStationSequence(stop) > routeStationSequence(fallbackOrigin));
+    if (fallbackOrigin && fallbackDestination) {
+      state.route.originStaOrder = routeStationSequence(fallbackOrigin);
+      state.route.destinationStaOrder = routeStationSequence(fallbackDestination);
+    }
   }
 
-  // 일부 순환·분기 노선은 동일 정류소가 중복되므로 이름까지 보조 비교한다.
-  const nameMatch = (station, selected) => String(station.stationName || '').replace(/\s/g, '')
-    === String(selected.stationName || '').replace(/\s/g, '');
-  const fallbackOrigin = stations.find(stop => nameMatch(stop, state.origin));
-  const fallbackDestination = stations.find(stop => nameMatch(stop, state.destination)
-    && routeStationSequence(stop) > routeStationSequence(fallbackOrigin));
-  if (fallbackOrigin && fallbackDestination) {
-    state.route.originStaOrder = routeStationSequence(fallbackOrigin);
-    state.route.destinationStaOrder = routeStationSequence(fallbackDestination);
+  const turnSeq = stations.map(stop => number(stop.turnSeq, NaN)).find(Number.isFinite);
+  if (Number.isFinite(turnSeq)) state.route.turnSeq = turnSeq;
+}
+
+function arrivalHasVehicle(item, index = 1) {
+  return Boolean(
+    idText(item?.[`vehId${index}`]) ||
+    String(item?.[`plateNo${index}`] || '').trim() ||
+    String(item?.[`locationNo${index}`] ?? '').trim()
+  );
+}
+
+function arrivalHasAnyVehicle(item) {
+  return arrivalHasVehicle(item, 1) || arrivalHasVehicle(item, 2);
+}
+
+function destinationExistsAfter(originSeq) {
+  return state.routeStations.some(stop => sameId(stop.stationId, state.destination?.stationId)
+    && routeStationSequence(stop) > originSeq);
+}
+
+function selectArrivalForRoute(items = []) {
+  if (!state.route) return null;
+  const routeId = String(state.route.routeId || '');
+  const expectedDestId = String(state.route.routeDestId || '');
+  const expectedDestName = normalizeName(state.route.routeDestName || '');
+  const previousOrder = number(state.route.originStaOrder, 0);
+
+  const candidates = items
+    .filter(item => String(item?.routeId || '') === routeId)
+    .map(item => {
+      const staOrder = number(item?.staOrder, NaN);
+      const destId = String(item?.routeDestId || '');
+      const destName = normalizeName(item?.routeDestName || '');
+      const pathValid = Number.isFinite(staOrder) && destinationExistsAfter(staOrder);
+      let score = pathValid ? 160 : -240;
+      if (expectedDestId && destId && expectedDestId === destId) score += 100;
+      if (expectedDestName && destName) {
+        if (expectedDestName === destName) score += 90;
+        else if (expectedDestName.includes(destName) || destName.includes(expectedDestName)) score += 45;
+      }
+      if (Number.isFinite(staOrder)) {
+        if (staOrder === previousOrder) score += 65;
+        score -= Math.min(80, Math.abs(staOrder - previousOrder) * 2);
+      }
+      if (arrivalHasAnyVehicle(item)) score += 35;
+      if (['RUN', 'PASS', 'WAIT'].includes(String(item?.flag || '').toUpperCase())) score += 8;
+      return { item, score, pathValid };
+    })
+    .filter(candidate => candidate.pathValid)
+    .sort((a, b) => b.score - a.score);
+
+  return candidates[0]?.item || null;
+}
+
+function applyArrivalDirection(item, source = 'list') {
+  state.arrival = item || {};
+  state.arrivalResolvedBy = item ? source : 'none';
+  if (!item || !state.route) return;
+  const staOrder = number(item.staOrder, NaN);
+  if (Number.isFinite(staOrder)) {
+    state.route.originStaOrder = staOrder;
+    reconcileRouteOrders(staOrder);
   }
+  if (item.routeDestId) state.route.routeDestId = item.routeDestId;
+  if (item.routeDestName) state.route.routeDestName = item.routeDestName;
+  const turnSeq = number(item.turnSeq, NaN);
+  if (Number.isFinite(turnSeq)) state.route.turnSeq = turnSeq;
 }
 
 async function api(action, params = {}, options = {}) {
@@ -521,13 +600,15 @@ async function chooseRoute(pair) {
   state.routeShape = [];
   state.locations = [];
   state.arrival = null;
+  state.arrivalList = [];
+  state.arrivalResolvedBy = 'none';
   state.mapScope = 'full';
-  state.vehicleScope = 'approaching';
+  state.vehicleScope = 'all';
   document.querySelectorAll('[data-map-scope]').forEach(button => {
     button.classList.toggle('active', button.dataset.mapScope === 'full');
   });
   document.querySelectorAll('[data-vehicle-scope]').forEach(button => {
-    button.classList.toggle('active', button.dataset.vehicleScope === 'approaching');
+    button.classList.toggle('active', button.dataset.vehicleScope === 'all');
   });
   state.foregroundAlarmKey = '';
   state.route = {
@@ -535,12 +616,13 @@ async function chooseRoute(pair) {
     routeName: pair.originRoute.routeName,
     routeTypeName: pair.originRoute.routeTypeName,
     routeDestName: pair.originRoute.routeDestName,
+    routeDestId: pair.originRoute.routeDestId || '',
     originStaOrder: number(pair.originRoute.staOrder),
     destinationStaOrder: number(pair.destRoute.staOrder)
   };
   els.liveSection.classList.remove('hidden');
   els.alertSection.classList.remove('hidden');
-  els.chosenRoute.innerHTML = `<div class="chosen-route-main"><span class="chosen-route-number">${esc(state.route.routeName)}</span><span><strong>${esc(state.route.routeDestName || '선택 노선')} 방면</strong><p>${esc(state.origin.stationName)} → ${esc(state.destination.stationName)}</p></span></div><small class="chosen-route-hint">실제 노선 전체를 먼저 그리고, 탑승 정류장으로 오는 차량을 버스 번호와 함께 표시합니다.</small>`;
+  els.chosenRoute.innerHTML = `<div class="chosen-route-main"><span class="chosen-route-number">${esc(state.route.routeName)}</span><span><strong>${esc(state.route.routeDestName || '선택 노선')} 방면</strong><p>${esc(state.origin.stationName)} → ${esc(state.destination.stationName)}</p></span></div><small class="chosen-route-hint">실제 노선 전체와 운행 차량을 먼저 표시하고, 공식 도착정보가 없으면 다음 회차에 가까운 차량도 따로 안내합니다.</small>`;
   if (els.liveVehicles) els.liveVehicles.innerHTML = '<div class="empty">노선과 운행 차량을 불러오는 중…</div>';
   els.liveSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
   await loadLive(true, { manual: true });
@@ -564,6 +646,8 @@ async function loadLive(fit = false, { manual = false, silent = false } = {}) {
   if (els.liveUpdated) els.liveUpdated.textContent = '실시간 정보 확인 중…';
 
   const errors = [];
+  let locationSucceeded = false;
+  let arrivalSucceeded = false;
   try {
     if (!state.routeStations.length) {
       const stationsData = await api('routeStations', { routeId: state.route.routeId }, { signal: controller.signal, timeout: 20000 });
@@ -577,16 +661,12 @@ async function loadLive(fit = false, { manual = false, silent = false } = {}) {
     if (!state.routeStations.length) throw new Error('선택한 버스의 경유 정류소 좌표를 찾지 못했습니다. 노선 API 승인 상태를 확인해 주세요.');
     reconcileRouteOrders();
 
-    const [shapeResult, locationResult, arrivalResult] = await Promise.allSettled([
+    const [shapeResult, locationResult, arrivalListResult] = await Promise.allSettled([
       state.routeShape.length
         ? Promise.resolve({ items: state.routeShape })
         : api('routeLines', { routeId: state.route.routeId }, { signal: controller.signal, timeout: 20000 }),
       api('busLocations', { routeId: state.route.routeId }, { signal: controller.signal, fresh: true, timeout: 18000 }),
-      api('arrival', {
-        stationId: state.origin.stationId,
-        routeId: state.route.routeId,
-        staOrder: state.route.originStaOrder
-      }, { signal: controller.signal, fresh: true, timeout: 18000 })
+      api('arrivalList', { stationId: state.origin.stationId }, { signal: controller.signal, fresh: true, timeout: 18000 })
     ]);
     if (requestId !== state.liveRequestId) return;
 
@@ -601,6 +681,7 @@ async function loadLive(fit = false, { manual = false, silent = false } = {}) {
     }
 
     if (locationResult.status === 'fulfilled') {
+      locationSucceeded = true;
       const nextLocations = (locationResult.value.items || [])
         .map(normalizeBusLocation)
         .filter(bus => Number.isFinite(number(bus.stationSeq, NaN)) || bus.stationId || normalizeKoreaCoordinate(bus.x, bus.y));
@@ -615,11 +696,32 @@ async function loadLive(fit = false, { manual = false, silent = false } = {}) {
       if (Date.now() - state.lastLocationSuccessAt > 90000) state.locations = [];
     }
 
-    if (arrivalResult.status === 'fulfilled') {
-      state.arrival = arrivalResult.value.item || {};
-    } else if (arrivalResult.reason?.name !== 'AbortError') {
-      errors.push(arrivalResult.reason);
-      state.arrival ||= {};
+    let matchedArrival = null;
+    if (arrivalListResult.status === 'fulfilled') {
+      arrivalSucceeded = true;
+      state.arrivalList = arrivalListResult.value.items || [];
+      matchedArrival = selectArrivalForRoute(state.arrivalList);
+      if (matchedArrival) applyArrivalDirection(matchedArrival, 'list');
+    } else if (arrivalListResult.reason?.name !== 'AbortError') {
+      errors.push(arrivalListResult.reason);
+      state.arrivalList = [];
+    }
+
+    // 목록조회에서 방향을 못 찾으면 기존 항목조회로 한 번 더 확인한다.
+    if (!matchedArrival) {
+      try {
+        const arrivalItem = await api('arrival', {
+          stationId: state.origin.stationId,
+          routeId: state.route.routeId,
+          staOrder: state.route.originStaOrder
+        }, { signal: controller.signal, fresh: true, timeout: 18000 });
+        if (requestId !== state.liveRequestId) return;
+        arrivalSucceeded = true;
+        applyArrivalDirection(arrivalItem.item || null, 'item');
+      } catch (error) {
+        if (error?.name !== 'AbortError') errors.push(error);
+        state.arrival ||= {};
+      }
     }
 
     state.lastLiveUpdatedAt = Date.now();
@@ -628,7 +730,7 @@ async function loadLive(fit = false, { manual = false, silent = false } = {}) {
     renderMap(fit || manual);
     checkForegroundAlarm();
 
-    if (locationResult.status === 'fulfilled' || arrivalResult.status === 'fulfilled') {
+    if (locationSucceeded || arrivalSucceeded) {
       updateApiState();
       els.apiState.textContent = '실시간 연결됨';
       els.apiState.closest('.live-pill')?.classList.add('is-good');
@@ -643,11 +745,14 @@ async function loadLive(fit = false, { manual = false, silent = false } = {}) {
 
     if (manual && !silent) {
       const collections = busCollections();
-      toast(collections.approaching.length
-        ? `오는 버스 ${collections.approaching.length}대와 실제 노선을 갱신했습니다.`
-        : collections.all.length
-          ? `전체 차량 ${collections.all.length}대가 운행 중이지만 현재 정류장으로 오는 차량은 없습니다.`
-          : '도착 예정 차량이 아직 없습니다. 실제 노선은 지도에 표시했습니다.', 4200);
+      const confirmedCount = collections.official.length + collections.current.length;
+      toast(confirmedCount
+        ? `현재 정류장으로 오는 차량 ${confirmedCount}대와 실제 노선을 갱신했습니다.`
+        : collections.predicted.length
+          ? `공식 도착정보는 없지만 다음 회차에 가까운 차량 ${collections.predicted.length}대를 표시했습니다.`
+          : collections.all.length
+            ? `전체 운행 차량 ${collections.all.length}대를 지도에 표시했습니다.`
+            : '현재 운행 차량이 조회되지 않았습니다. 실제 노선은 지도에 표시했습니다.', 4400);
     }
   } catch (error) {
     if (error?.name === 'AbortError') return;
@@ -673,24 +778,56 @@ async function loadLive(fit = false, { manual = false, silent = false } = {}) {
 
 function renderArrival() {
   const a = state.arrival || {};
+  const fallback = busCollections().approaching;
   const cards = [1, 2].map(index => {
     const minRaw = a[`predictTime${index}`];
+    const secRaw = a[`predictTimeSec${index}`];
     const stopsRaw = a[`locationNo${index}`];
     const hasMinutes = minRaw !== null && minRaw !== undefined && String(minRaw).trim() !== '';
+    const hasSeconds = secRaw !== null && secRaw !== undefined && String(secRaw).trim() !== '';
     const hasStops = stopsRaw !== null && stopsRaw !== undefined && String(stopsRaw).trim() !== '';
-    const min = number(minRaw, -1);
+    const hasOfficial = hasMinutes || hasSeconds || hasStops || arrivalHasVehicle(a, index);
+    const min = hasMinutes ? number(minRaw, -1) : hasSeconds ? Math.ceil(number(secRaw, 0) / 60) : -1;
     const stops = number(stopsRaw, -1);
     const plate = a[`plateNo${index}`] || '';
     const stationName = a[`stationNm${index}`] || '';
-    const timeText = hasMinutes ? (min <= 0 ? '곧 도착' : `${min}분`) : '정보 없음';
-    const stopText = hasStops
-      ? (stops <= 0 ? '정류장 도착·통과 중' : `${stops}정거장 전`)
-      : '운행정보 없음';
-    return `<div class="arrival-card">
+
+    if (hasOfficial) {
+      const timeText = min >= 0 ? (min <= 0 ? '곧 도착' : `${min}분`) : '실시간';
+      const stopText = hasStops
+        ? (stops <= 0 ? '정류장 도착·통과 중' : `${stops}정거장 전`)
+        : '도착정보 확인 중';
+      return `<div class="arrival-card">
+        <div class="arrival-label">${index === 1 ? '가장 가까운 버스' : '다음 버스'}</div>
+        <div class="arrival-time">${timeText}</div>
+        <div class="arrival-stops">${stopText}</div>
+        <div class="arrival-label">${esc(stationName || plate || '공식 도착정보')}</div>
+      </div>`;
+    }
+
+    const bus = fallback[index - 1];
+    if (bus) {
+      const remaining = number(bus._remainingStops, -1);
+      const modeText = bus._returnApproach ? '회차 후 접근'
+        : bus._fallbackApproach ? '다음 회차' : '실시간 위치';
+      const distanceText = remaining < 0 ? '위치 확인 중'
+        : remaining === 0 ? '탑승 정류장 도착·진입 중'
+          : bus._fallbackApproach ? `다음 회차까지 약 ${remaining}정거장`
+            : `탑승 정류장까지 약 ${remaining}정거장`;
+      const vehicle = bus.plateNo || (bus.vehId ? `차량 ${bus.vehId}` : '차량정보 확인 중');
+      return `<div class="arrival-card estimated${bus._returnApproach ? ' returning' : ''}">
+        <div class="arrival-label">${index === 1 ? '가장 가까운 운행 차량' : '그다음 운행 차량'}</div>
+        <div class="arrival-time">${modeText}</div>
+        <div class="arrival-stops">${distanceText}</div>
+        <div class="arrival-label">${esc(vehicle)} · 실시간 위치 기준</div>
+      </div>`;
+    }
+
+    return `<div class="arrival-card empty-arrival">
       <div class="arrival-label">${index === 1 ? '가장 가까운 버스' : '다음 버스'}</div>
-      <div class="arrival-time">${timeText}</div>
-      <div class="arrival-stops">${stopText}</div>
-      <div class="arrival-label">${esc(stationName || plate || '')}</div>
+      <div class="arrival-time">정보 없음</div>
+      <div class="arrival-stops">현재 운행정보 없음</div>
+      <div class="arrival-label">잠시 후 다시 갱신해 주세요.</div>
     </div>`;
   }).join('');
   els.arrivalGrid.innerHTML = cards;
@@ -771,30 +908,159 @@ function mergeArrivalBus(bus, metadata) {
   };
 }
 
+function routeTopology() {
+  const ordered = [...(state.routeStations || [])]
+    .filter(stop => Number.isFinite(routeStationSequence(stop)))
+    .sort((a, b) => routeStationSequence(a) - routeStationSequence(b));
+  const count = ordered.length;
+  const sequences = ordered.map(routeStationSequence);
+  const minSeq = count ? Math.min(...sequences) : 0;
+  const maxSeq = count ? Math.max(...sequences) : 0;
+  const originSeq = number(state.route?.originStaOrder, NaN);
+  const destinationSeq = number(state.route?.destinationStaOrder, NaN);
+  let originIndex = ordered.findIndex(stop => routeStationSequence(stop) === originSeq);
+  if (originIndex < 0 && state.origin?.stationId) {
+    originIndex = ordered.findIndex(stop => sameId(stop.stationId, state.origin.stationId));
+  }
+  let destinationIndex = ordered.findIndex(stop => routeStationSequence(stop) === destinationSeq);
+  if (destinationIndex < 0 && state.destination?.stationId) {
+    destinationIndex = ordered.findIndex(stop => sameId(stop.stationId, state.destination.stationId));
+  }
+
+  let turnSeq = number(state.route?.turnSeq, NaN);
+  if (!Number.isFinite(turnSeq)) {
+    const turnStop = ordered.find(stop => stop.turnYn === 'Y')
+      || ordered.find(stop => Number.isFinite(number(stop.turnSeq, NaN)));
+    turnSeq = turnStop ? number(turnStop.turnSeq, routeStationSequence(turnStop)) : NaN;
+  }
+  let turnIndex = Number.isFinite(turnSeq)
+    ? ordered.findIndex(stop => routeStationSequence(stop) === turnSeq)
+    : -1;
+  if (turnIndex < 0 && Number.isFinite(turnSeq) && count) {
+    turnIndex = ordered.reduce((best, stop, index) => {
+      const distance = Math.abs(routeStationSequence(stop) - turnSeq);
+      return distance < best.distance ? { index, distance } : best;
+    }, { index: -1, distance: Infinity }).index;
+  }
+
+  const hasReturnLeg = turnIndex >= 0 && turnIndex < count - 1;
+  const originAtStart = originIndex >= 0 && originIndex <= Math.max(1, Math.floor(count * .06));
+  return {
+    ordered, count, minSeq, maxSeq, originSeq, destinationSeq,
+    originIndex, destinationIndex, turnSeq, turnIndex,
+    hasReturnLeg, loopCapable: hasReturnLeg, originAtStart
+  };
+}
+
+function busRouteIndex(bus, topology = routeTopology()) {
+  if (!topology.count) return -1;
+  const seq = number(bus?.stationSeq, NaN);
+  if (Number.isFinite(seq)) {
+    const exact = topology.ordered.findIndex(stop => routeStationSequence(stop) === seq);
+    if (exact >= 0) return exact;
+  }
+  if (bus?.stationId) {
+    const matches = topology.ordered
+      .map((stop, index) => ({ stop, index }))
+      .filter(entry => sameId(entry.stop.stationId, bus.stationId));
+    if (matches.length === 1) return matches[0].index;
+    if (matches.length && Number.isFinite(seq)) {
+      return matches.sort((a, b) => Math.abs(routeStationSequence(a.stop) - seq) - Math.abs(routeStationSequence(b.stop) - seq))[0].index;
+    }
+    if (matches.length) return matches[0].index;
+  }
+  if (!Number.isFinite(seq)) return -1;
+  return topology.ordered.reduce((best, stop, index) => {
+    const distance = Math.abs(routeStationSequence(stop) - seq);
+    return distance < best.distance ? { index, distance } : best;
+  }, { index: -1, distance: Infinity }).index;
+}
+
 function syntheticArrivalBus(metadata) {
+  const topology = routeTopology();
   const locationNo = Math.max(0, number(metadata._locationNo, 0));
-  const originOrder = number(state.route?.originStaOrder, 1);
-  const arrivalName = normalizeName(metadata.stationName);
-  const matchingStops = arrivalName
-    ? state.routeStations.filter(stop => {
-      const stopName = normalizeName(stop.stationName);
-      return stopName && (stopName === arrivalName || stopName.includes(arrivalName) || arrivalName.includes(stopName));
-    })
-    : [];
-  const beforeOrigin = matchingStops
-    .filter(stop => routeStationSequence(stop) <= originOrder)
-    .sort((a, b) => routeStationSequence(b) - routeStationSequence(a));
-  const matched = beforeOrigin[0] || matchingStops[0];
+  const originIndex = topology.originIndex;
+  let matched = null;
+
+  if (originIndex >= 0 && topology.count) {
+    const targetIndex = topology.loopCapable
+      ? (originIndex - locationNo + topology.count) % topology.count
+      : Math.max(0, originIndex - locationNo);
+    matched = topology.ordered[targetIndex] || null;
+  }
+
+  if (!matched) {
+    const arrivalName = normalizeName(metadata.stationName);
+    const matchingStops = arrivalName
+      ? state.routeStations.filter(stop => {
+        const stopName = normalizeName(stop.stationName);
+        return stopName && (stopName === arrivalName || stopName.includes(arrivalName) || arrivalName.includes(stopName));
+      })
+      : [];
+    matched = matchingStops[0] || null;
+  }
+
   return {
     ...metadata,
     _synthetic: true,
     stationId: matched?.stationId || '',
-    stationSeq: matched ? routeStationSequence(matched) : Math.max(1, originOrder - locationNo)
+    stationSeq: matched ? routeStationSequence(matched) : number(state.route?.originStaOrder, 1)
+  };
+}
+
+function busUniqueKey(bus) {
+  return idText(bus?.vehId) || normalizePlate(bus?.plateNo) || `synthetic:${bus?._arrivalRank || ''}:${bus?.stationSeq}`;
+}
+
+function annotateBusProgress(bus) {
+  const topology = routeTopology();
+  const busIndex = busRouteIndex(bus, topology);
+  if (busIndex < 0 || topology.originIndex < 0) {
+    return {
+      ...bus, _routeIndex: busIndex, _remainingStops: NaN,
+      _directApproach: false, _returnApproach: false, _nextCycle: false
+    };
+  }
+
+  const stateCode = number(bus?.stateCd, -1);
+  const departedOrigin = busIndex === topology.originIndex && stateCode === 2;
+  const sameOriginPhysical = sameId(bus?.stationId, state.origin?.stationId);
+  let remainingStops;
+  if (sameOriginPhysical && !departedOrigin) remainingStops = 0;
+  else if (busIndex < topology.originIndex) remainingStops = topology.originIndex - busIndex;
+  else if (busIndex === topology.originIndex) remainingStops = departedOrigin && topology.loopCapable ? topology.count : 0;
+  else remainingStops = topology.loopCapable ? topology.count - busIndex + topology.originIndex : NaN;
+
+  let directApproach = false;
+  let returnApproach = false;
+  if (topology.turnIndex >= 0) {
+    if (topology.originIndex <= topology.turnIndex) {
+      directApproach = busIndex < topology.originIndex || (busIndex === topology.originIndex && !departedOrigin);
+      returnApproach = topology.originAtStart && topology.hasReturnLeg
+        && busIndex >= topology.turnIndex && busIndex > topology.originIndex;
+      directApproach ||= returnApproach;
+    } else {
+      // 탑승 정류장이 회차점 이후라면 회차 전 차량도 같은 운행에서 정류장으로 접근한다.
+      directApproach = busIndex < topology.originIndex || (busIndex === topology.originIndex && !departedOrigin);
+    }
+  } else {
+    directApproach = busIndex < topology.originIndex || (busIndex === topology.originIndex && !departedOrigin);
+  }
+  if (sameOriginPhysical && !departedOrigin) directApproach = true;
+
+  const nextCycle = !directApproach && topology.loopCapable && Number.isFinite(remainingStops);
+  return {
+    ...bus,
+    _routeIndex: busIndex,
+    _remainingStops: remainingStops,
+    _directApproach: directApproach,
+    _returnApproach: returnApproach,
+    _nextCycle: nextCycle
   };
 }
 
 function busCollections() {
-  const actual = (state.locations || []).map(bus => ({ ...bus, vehId: idText(bus.vehId) }));
+  const actual = (state.locations || []).map(bus => annotateBusProgress({ ...bus, vehId: idText(bus.vehId) }));
   const actualByVehicle = new Map(actual.filter(bus => bus.vehId).map(bus => [bus.vehId, bus]));
   const actualByPlate = new Map(actual.filter(bus => bus.plateNo).map(bus => [normalizePlate(bus.plateNo), bus]));
   const matchedIds = new Set();
@@ -803,50 +1069,77 @@ function busCollections() {
     const plateKey = normalizePlate(metadata.plateNo);
     const match = (metadata.vehId ? actualByVehicle.get(metadata.vehId) : null)
       || (plateKey ? actualByPlate.get(plateKey) : null);
+    const merged = match ? mergeArrivalBus(match, metadata) : syntheticArrivalBus(metadata);
     if (match) {
       if (metadata.vehId) matchedIds.add(metadata.vehId);
       if (plateKey) matchedPlates.add(plateKey);
-      return mergeArrivalBus(match, metadata);
     }
-    return syntheticArrivalBus(metadata);
+    const annotated = annotateBusProgress(merged);
+    return {
+      ...annotated,
+      _remainingStops: number(metadata._locationNo, annotated._remainingStops),
+      _nextCycle: false,
+      _directApproach: true,
+      _officialArrival: true
+    };
   });
 
-  const originOrder = number(state.route?.originStaOrder, 0);
-  const otherApproaching = actual.filter(bus => {
+  const unmatchedActual = actual.filter(bus => {
     if (bus.vehId && matchedIds.has(bus.vehId)) return false;
     if (bus.plateNo && matchedPlates.has(normalizePlate(bus.plateNo))) return false;
-    const seq = number(bus.stationSeq, NaN);
-    return Number.isFinite(seq) && seq <= originOrder;
+    return true;
   });
+  const currentApproaching = unmatchedActual
+    .filter(bus => bus._directApproach && Number.isFinite(number(bus._remainingStops, NaN)))
+    .sort((a, b) => number(a._remainingStops, Infinity) - number(b._remainingStops, Infinity));
 
-  const uniqueKey = bus => bus.vehId || normalizePlate(bus.plateNo) || `synthetic:${bus._arrivalRank || ''}:${bus.stationSeq}`;
-  const approaching = [...exactArrivals, ...otherApproaching]
-    .filter((bus, index, array) => array.findIndex(item => uniqueKey(item) === uniqueKey(bus)) === index)
+  const directCount = exactArrivals.length + currentApproaching.length;
+  const predicted = unmatchedActual
+    .filter(bus => !bus._directApproach && Number.isFinite(number(bus._remainingStops, NaN)) && number(bus._remainingStops, 0) > 0)
+    .sort((a, b) => number(a._remainingStops, Infinity) - number(b._remainingStops, Infinity))
+    .slice(0, Math.max(0, 2 - directCount))
+    .map(bus => ({ ...bus, _fallbackApproach: true, _nextCycle: true }));
+
+  const approaching = [...exactArrivals, ...currentApproaching, ...predicted]
+    .filter((bus, index, array) => array.findIndex(item => busUniqueKey(item) === busUniqueKey(bus)) === index)
     .sort((a, b) => {
       if (a._arrivalRank && b._arrivalRank) return a._arrivalRank - b._arrivalRank;
       if (a._arrivalRank) return -1;
       if (b._arrivalRank) return 1;
-      return number(b.stationSeq) - number(a.stationSeq);
+      if (a._directApproach !== b._directApproach) return a._directApproach ? -1 : 1;
+      return number(a._remainingStops, Infinity) - number(b._remainingStops, Infinity);
     });
 
   const exactByVehicle = new Map(exactArrivals.filter(bus => bus.vehId && !bus._synthetic).map(bus => [bus.vehId, bus]));
   const exactByPlate = new Map(exactArrivals.filter(bus => bus.plateNo && !bus._synthetic).map(bus => [normalizePlate(bus.plateNo), bus]));
-  const all = actual.map(bus => exactByVehicle.get(bus.vehId) || exactByPlate.get(normalizePlate(bus.plateNo)) || bus);
+  const predictedByKey = new Map(predicted.map(bus => [busUniqueKey(bus), bus]));
+  const all = actual.map(bus => exactByVehicle.get(bus.vehId)
+    || exactByPlate.get(normalizePlate(bus.plateNo))
+    || predictedByKey.get(busUniqueKey(bus))
+    || bus);
   exactArrivals.filter(bus => bus._synthetic).forEach(bus => all.push(bus));
-  const dedupedAll = all.filter((bus, index, array) => array.findIndex(item => uniqueKey(item) === uniqueKey(bus)) === index);
-  return { approaching, all: dedupedAll };
+  const dedupedAll = all.filter((bus, index, array) => array.findIndex(item => busUniqueKey(item) === busUniqueKey(bus)) === index);
+  return {
+    approaching,
+    all: dedupedAll,
+    official: exactArrivals,
+    current: currentApproaching,
+    returning: currentApproaching.filter(bus => bus._returnApproach),
+    predicted
+  };
 }
-
 
 function renderLiveVehicleList() {
   if (!els.liveVehicles || !state.route) return;
   const collections = busCollections();
-  const incomingKeys = new Set(collections.approaching.map(bus => bus.vehId || normalizePlate(bus.plateNo) || `rank:${bus._arrivalRank}`));
+  const incomingKeys = new Set(collections.approaching.map(busUniqueKey));
+  const predictedKeys = new Set(collections.predicted.map(busUniqueKey));
+  const returningKeys = new Set(collections.returning.map(busUniqueKey));
   const ordered = [...collections.all].sort((a, b) => {
-    const aIncoming = incomingKeys.has(a.vehId || normalizePlate(a.plateNo) || `rank:${a._arrivalRank}`);
-    const bIncoming = incomingKeys.has(b.vehId || normalizePlate(b.plateNo) || `rank:${b._arrivalRank}`);
+    const aIncoming = incomingKeys.has(busUniqueKey(a));
+    const bIncoming = incomingKeys.has(busUniqueKey(b));
     if (aIncoming !== bIncoming) return aIncoming ? -1 : 1;
-    return number(b.stationSeq) - number(a.stationSeq);
+    return number(a._remainingStops, Infinity) - number(b._remainingStops, Infinity);
   });
 
   if (!ordered.length) {
@@ -855,14 +1148,20 @@ function renderLiveVehicleList() {
   }
 
   els.liveVehicles.innerHTML = ordered.map((bus, index) => {
-    const key = bus.vehId || normalizePlate(bus.plateNo) || `rank:${bus._arrivalRank}`;
+    const key = busUniqueKey(bus);
     const incoming = incomingKeys.has(key);
+    const predicted = predictedKeys.has(key);
+    const returning = returningKeys.has(key);
     const status = busMapStatus(bus);
     const vehicle = bus.plateNo || (bus.vehId ? `차량 ${bus.vehId}` : '차량번호 확인 중');
-    return `<button type="button" class="live-vehicle-row${incoming ? ' incoming' : ''}" data-live-vehicle="${index}">
+    const stateText = bus._arrivalRank ? `${bus._arrivalRank}번째`
+      : returning ? '회차 후 접근'
+        : predicted ? '다음 회차'
+          : incoming ? '오는 버스' : '운행 중';
+    return `<button type="button" class="live-vehicle-row${incoming ? ' incoming' : ''}${predicted ? ' predicted' : ''}${returning ? ' returning' : ''}" data-live-vehicle="${index}">
       <span class="live-route-badge">${esc(state.route.routeName)}</span>
       <span class="live-vehicle-copy"><strong>${esc(vehicle)}</strong><small>${esc(status.label)}</small></span>
-      <span class="live-vehicle-state">${incoming ? (bus._arrivalRank ? `${bus._arrivalRank}번째` : '오는 버스') : '운행 중'}</span>
+      <span class="live-vehicle-state">${stateText}</span>
     </button>`;
   }).join('');
 
@@ -886,15 +1185,21 @@ function ensureMap() {
 }
 
 function stopMarkerClass(seq) {
+  const topology = routeTopology();
+  const index = topology.ordered.findIndex(stop => routeStationSequence(stop) === seq);
   if (seq === state.route.originStaOrder) return 'origin';
   if (seq === state.route.destinationStaOrder) return 'destination';
-  if (seq < state.route.originStaOrder) return 'approach';
+  if (index >= 0) {
+    if (index < topology.originIndex) return 'approach';
+    if (topology.originAtStart && topology.hasReturnLeg && index >= topology.turnIndex) return 'approach';
+  }
   if (seq > state.route.destinationStaOrder) return 'after';
   return 'journey';
 }
 
 function busMapStatus(bus) {
-  const seq = number(bus.stationSeq);
+  const seq = number(bus.stationSeq, NaN);
+  const remaining = number(bus._remainingStops, NaN);
   if (bus._arrivalRank) {
     const locationNo = number(bus._locationNo, -1);
     const arrivalLabel = bus._arrivalRank === 1 ? '첫 번째 도착 버스' : '두 번째 도착 버스';
@@ -904,12 +1209,31 @@ function busMapStatus(bus) {
       label: `${arrivalLabel} · ${distanceLabel}`
     };
   }
-  if (seq <= state.route.originStaOrder) {
-    const remaining = Math.max(0, state.route.originStaOrder - seq);
-    return { className: 'approach', label: remaining ? `탑승 정류장까지 약 ${remaining}정거장` : '탑승 정류장 도착 중' };
+  if (bus._returnApproach) {
+    return {
+      className: 'return-approach',
+      label: Number.isFinite(remaining)
+        ? `회차 후 탑승 정류장까지 약 ${remaining}정거장`
+        : '회차 후 탑승 정류장으로 접근 중'
+    };
   }
-  if (seq <= state.route.destinationStaOrder) return { className: 'journey', label: '탑승 정류장을 지나 목적지 방향으로 운행 중' };
-  return { className: 'after', label: '목적지 이후 구간 운행 중' };
+  if (bus._fallbackApproach) {
+    return {
+      className: 'next-cycle',
+      label: Number.isFinite(remaining) ? `다음 회차까지 약 ${remaining}정거장` : '다음 회차 위치 확인 중'
+    };
+  }
+  if (bus._directApproach) {
+    return {
+      className: 'approach',
+      label: Number.isFinite(remaining) && remaining > 0
+        ? `탑승 정류장까지 약 ${remaining}정거장`
+        : '탑승 정류장 도착·진입 중'
+    };
+  }
+  const nextText = Number.isFinite(remaining) ? ` · 다음 회차까지 약 ${remaining}정거장` : '';
+  if (Number.isFinite(seq) && seq <= state.route.destinationStaOrder) return { className: 'journey', label: `탑승 정류장을 지나 목적지 방향으로 운행 중${nextText}` };
+  return { className: 'after', label: `목적지 이후 구간 운행 중${nextText}` };
 }
 
 function drawPolyline(stops, options) {
@@ -934,6 +1258,26 @@ function splitRoutePath(latlngs, maxJumpMeters = 3500) {
 }
 
 
+function approachStopSegments(ordered) {
+  const topology = routeTopology();
+  if (topology.originIndex < 0 || !ordered.length) return [];
+  const segments = [];
+
+  if (topology.originIndex > 0) segments.push(ordered.slice(0, topology.originIndex + 1));
+  if (topology.originAtStart && topology.hasReturnLeg) {
+    const returnSegment = ordered.slice(Math.max(0, topology.turnIndex), ordered.length);
+    const lastPos = stationPosition(returnSegment[returnSegment.length - 1]);
+    const originPos = stationPosition(ordered[topology.originIndex]);
+    if (lastPos && originPos && distanceMeters(lastPos[0], lastPos[1], originPos[0], originPos[1]) < 4000) {
+      const samePoint = distanceMeters(lastPos[0], lastPos[1], originPos[0], originPos[1]) < 20;
+      if (!samePoint) returnSegment.push(ordered[topology.originIndex]);
+    }
+    if (returnSegment.length > 1) segments.push(returnSegment);
+  }
+  if (!segments.length && topology.originIndex >= 0) segments.push(ordered.slice(0, topology.originIndex + 1));
+  return segments;
+}
+
 function renderMap(fit = false) {
   const map = ensureMap();
   state.routeLayer.clearLayers();
@@ -951,14 +1295,17 @@ function renderMap(fit = false) {
     opacity: routeShapeSegments.length ? .30 : .84, lineCap: 'round', lineJoin: 'round'
   });
   const allLatlngs = routeShapeSegments.length ? routeShapeSegments.flat() : stationRouteLatlngs;
-  const approachStops = ordered.filter(stop => number(stop.stationSeq) <= state.route.originStaOrder);
+  const approachSegments = approachStopSegments(ordered);
   const journeyStops = ordered.filter(stop => {
     const seq = number(stop.stationSeq);
     return seq >= state.route.originStaOrder && seq <= state.route.destinationStaOrder;
   });
   const afterStops = ordered.filter(stop => number(stop.stationSeq) >= state.route.destinationStaOrder);
 
-  const approachLatlngs = drawPolyline(approachStops, { color: '#24c8f2', weight: 6, opacity: .96, dashArray: '10 8', lineCap: 'round' });
+  const approachLatlngs = [];
+  approachSegments.forEach(segment => {
+    approachLatlngs.push(...drawPolyline(segment, { color: '#24c8f2', weight: 6, opacity: .96, dashArray: '10 8', lineCap: 'round' }));
+  });
   const journeyLatlngs = drawPolyline(journeyStops, { color: '#1975ff', weight: 8, opacity: .98, lineCap: 'round', lineJoin: 'round' });
   drawPolyline(afterStops, { color: '#8b98aa', weight: 4, opacity: .32, dashArray: '4 9' });
 
@@ -1006,8 +1353,8 @@ function renderMap(fit = false) {
       iconAnchor: bus._arrivalRank ? [34, 26] : [31, 24]
     });
     const vehicleLabel = bus.plateNo || (bus.vehId ? `차량 ${bus.vehId}` : '차량정보 확인 중');
-    const sourceLabel = bus._synthetic ? '<br><small>도착정보 기준 추정 위치</small>' : '';
-    L.marker(pos, { icon, zIndexOffset: bus._arrivalRank ? 1300 : 1000 })
+    const sourceLabel = bus._synthetic ? '<br><small>도착정보 기준 추정 위치</small>' : bus._fallbackApproach ? '<br><small>다음 회차 후보 · GPS 위치 기준</small>' : '';
+    L.marker(pos, { icon, zIndexOffset: bus._arrivalRank ? 1300 : bus._fallbackApproach ? 1200 : 1000 })
       .bindPopup(`<strong>${esc(state.route.routeName)}번</strong><br>${esc(vehicleLabel)}<br>${esc(status.label)}<br>${seq}번째 정류장 부근${sourceLabel}`)
       .addTo(state.markerLayer);
   });
@@ -1028,16 +1375,23 @@ function renderMap(fit = false) {
     L.marker(userPos, { icon, zIndexOffset: 1500 }).bindPopup('<strong>내 현재 위치</strong>').addTo(state.markerLayer);
   }
 
-  const approachingCount = collections.approaching.length;
+  const confirmedCount = collections.official.length + collections.current.length;
+  const predictedCount = collections.predicted.length;
   const allCount = collections.all.length;
-  els.busCount.textContent = `오는 버스 ${approachingCount}대 · 전체 ${allCount}대`;
+  els.busCount.textContent = confirmedCount
+    ? `오는 버스 ${confirmedCount}대 · 전체 ${allCount}대`
+    : predictedCount
+      ? `다음 회차 후보 ${predictedCount}대 · 전체 ${allCount}대`
+      : `오는 버스 0대 · 전체 ${allCount}대`;
   if (state.vehicleScope === 'approaching') {
-    els.mapNote.textContent = approachingCount
-      ? '탑승 정류장으로 오는 차량을 표시합니다. 각 마커에는 노선번호와 차량번호 끝자리가 함께 표시됩니다.'
-      : '도착정보와 위치정보에서 현재 탑승 정류장으로 오는 차량이 확인되지 않습니다. “전체 차량”에서 운행 위치를 볼 수 있습니다.';
+    els.mapNote.textContent = confirmedCount
+      ? '공식 도착정보와 실시간 위치를 함께 사용하며, 출발 종점에서는 회차 후 돌아오는 차량도 오는 버스로 표시합니다.'
+      : predictedCount
+        ? '공식 도착 예정 차량이 없어, 현재 노선 위 차량 중 다음 회차에 가장 먼저 올 가능성이 높은 차량을 주황색으로 표시합니다.'
+        : '현재 탑승 정류장에 접근 중인 차량이 확인되지 않습니다. “전체 차량”에서 모든 운행 위치를 볼 수 있습니다.';
   } else {
     els.mapNote.textContent = allCount
-      ? '선택한 실제 노선 전체와 운행 차량을 모두 표시합니다. 탑승 정류장을 지난 차량도 포함됩니다.'
+      ? '선택한 실제 노선 전체와 모든 운행 차량을 표시합니다. 각 마커에는 노선번호와 차량번호 끝자리가 표시됩니다.'
       : '선택한 실제 노선은 표시됐지만 현재 운행 차량 정보가 없습니다. 잠시 후 새로고침해 주세요.';
   }
 
@@ -1097,20 +1451,37 @@ async function showLocalNotification(title, body) {
 
 function checkForegroundAlarm() {
   if (!state.route || !withinLocalSchedule()) return;
-  const locationNo = number(state.arrival?.locationNo1, 0);
+  let locationNo = number(state.arrival?.locationNo1, 0);
+  let plate = String(state.arrival?.plateNo1 || '');
+  let vehicleId = String(state.arrival?.vehId1 || '');
+  let approximate = false;
+
+  // 종점 정류소는 공식 도착정보가 비는 경우가 있어 실시간 stationSeq로 남은 정류장을 계산한다.
+  if (locationNo <= 0) {
+    const currentBus = busCollections().approaching
+      .filter(bus => number(bus._remainingStops, 0) > 0)
+      .sort((a, b) => number(a._remainingStops, Infinity) - number(b._remainingStops, Infinity))[0];
+    if (currentBus) {
+      locationNo = number(currentBus._remainingStops, 0);
+      plate = String(currentBus.plateNo || '');
+      vehicleId = String(currentBus.vehId || '');
+      approximate = !currentBus._officialArrival;
+    }
+  }
+
   const lead = number($('leadStops').value, 3);
-  const plate = String(state.arrival?.plateNo1 || '');
-  const key = `${new Date().toDateString()}:${state.route.routeId}:${plate}`;
+  const vehicleKey = plate || vehicleId || 'unknown';
+  const key = `${new Date().toDateString()}:${state.route.routeId}:${vehicleKey}`;
   if (locationNo > 0 && locationNo <= lead && key !== state.foregroundAlarmKey) {
     state.foregroundAlarmKey = key;
     state.lastAlertAt = Date.now();
-    const title = `${state.route.routeName}번 ${locationNo}정거장 전`;
+    const title = `${state.route.routeName}번 ${approximate ? '약 ' : ''}${locationNo}정거장 전`;
     const body = `${state.origin.stationName}에 곧 도착합니다.`;
     if ($('alertMode').value === 'push') playAlarm();
     showLocalNotification(title, body);
     toast(body, 5000);
   }
-  if (locationNo > lead) state.foregroundAlarmKey = '';
+  if (locationNo > lead || locationNo <= 0) state.foregroundAlarmKey = '';
 }
 
 function startPolling() {
@@ -1124,7 +1495,7 @@ async function initFirebase() {
   try {
     const configResponse = await fetch('/api/config', { cache: 'no-store' });
     state.firebaseConfig = await configResponse.json();
-    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.6.0', { scope: '/' });
+    state.swRegistration = await navigator.serviceWorker.register('/api/firebase-messaging-sw?v=1.7.0', { scope: '/' });
 
     if (!state.firebaseConfig.backgroundPushConfigured) {
       els.pushState.textContent = '화면 켤 때만';
@@ -1218,6 +1589,7 @@ async function saveAlert() {
 }
 
 function buildAlertPayload(fcmToken) {
+  const topology = routeTopology();
   return {
     enabled: $('alertEnabled').checked,
     routeId: String(state.route.routeId),
@@ -1225,6 +1597,16 @@ function buildAlertPayload(fcmToken) {
     stationId: String(state.origin.stationId),
     stationName: String(state.origin.stationName),
     staOrder: number(state.route.originStaOrder),
+    routeDestId: String(state.route.routeDestId || ''),
+    routeDestName: String(state.route.routeDestName || ''),
+    routeMinSeq: topology.minSeq,
+    routeMaxSeq: topology.maxSeq,
+    routeStationCount: topology.count,
+    originRouteIndex: topology.originIndex,
+    turnSeq: number(topology.turnSeq, 0),
+    turnRouteIndex: topology.turnIndex,
+    loopCapable: topology.loopCapable,
+    originAtStart: topology.originAtStart,
     destinationStationId: String(state.destination?.stationId || ''),
     destinationStationName: String(state.destination?.stationName || ''),
     leadStops: number($('leadStops').value, 3),

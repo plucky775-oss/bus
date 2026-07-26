@@ -14,7 +14,7 @@
   <link rel="icon" type="image/png" href="/icons/favicon.png" />
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="/styles.css?v=1.5.0" />
+  <link rel="stylesheet" href="/styles.css?v=1.7.0" />
 </head>
 <body>
   <div class="app-shell">
@@ -153,8 +153,8 @@
               <button type="button" data-map-scope="journey">탑승 구간</button>
             </div>
             <div class="map-vehicle-control" role="group" aria-label="버스 표시 기준">
-              <button type="button" class="active" data-vehicle-scope="approaching">오는 버스</button>
-              <button type="button" data-vehicle-scope="all">전체 차량</button>
+              <button type="button" data-vehicle-scope="approaching">오는 버스</button>
+              <button type="button" class="active" data-vehicle-scope="all">전체 차량</button>
             </div>
           </div>
           <div class="map-live-chip"><span class="pulse"></span><span id="busCount">운행 차량 확인 중</span></div>
@@ -162,9 +162,9 @@
         <div class="map-legend" aria-label="지도 범례">
           <span><i class="legend-line approach"></i>탑승 전 접근 구간</span>
           <span><i class="legend-line journey"></i>탑승 이동 구간</span>
-          <span><i class="legend-bus"></i>탑승 정류장으로 오는 버스</span>
+          <span><i class="legend-bus"></i>운행 버스 · 노선번호/차량번호</span>
         </div>
-        <p class="map-note" id="mapNote">선택한 실제 노선 전체와 탑승 정류장으로 오는 차량을 버스 번호와 함께 표시합니다.</p>
+        <p class="map-note" id="mapNote">선택한 실제 노선 전체와 모든 운행 차량을 먼저 표시합니다. “오는 버스”에서는 공식 도착차량과 다음 회차 후보를 확인할 수 있습니다.</p>
       </section>
 
       <section class="card alert-card hidden" id="alertSection">
@@ -269,6 +269,6 @@
   <audio id="alarmAudio" preload="auto"></audio>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-  <script type="module" src="/app.js?v=1.6.0"></script>
+  <script type="module" src="/app.js?v=1.7.0"></script>
 </body>
 </html>

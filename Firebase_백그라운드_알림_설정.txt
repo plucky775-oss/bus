@@ -1,17 +1,27 @@
 Firebase 백그라운드 버스 알림 필수 설정
 
-현재 화면에 나온 auth/configuration-not-found 오류는 Firebase 익명 로그인이 꺼져 있다는 뜻입니다.
+1. Firebase 콘솔 → Authentication → 로그인 방법에서 익명(Anonymous)을 사용 설정합니다.
+2. Firestore Database를 생성합니다.
+3. 프로젝트의 firestore.rules와 functions 폴더를 배포합니다.
+4. 앱을 새로 열고 노선을 다시 선택한 뒤 “알림 허용하고 저장”을 다시 누릅니다.
 
-1. Firebase 콘솔에서 bus 프로젝트를 엽니다.
-2. 왼쪽 메뉴에서 빌드(Build) → Authentication을 엽니다.
-3. 시작하기를 누른 뒤 로그인 방법(Sign-in method)을 엽니다.
-4. 익명(Anonymous)을 선택합니다.
-5. 사용 설정을 켜고 저장합니다.
-6. Firestore Database가 없다면 데이터베이스 만들기를 진행합니다.
-7. 프로젝트의 firestore.rules와 functions 폴더를 Firebase에 배포합니다.
-8. 앱을 다시 열어 알림 허용하고 저장을 누릅니다.
+중요
+- 앱 화면을 열어둔 동안의 30초 간격 로컬 알림은 Firebase Functions 없이도 동작합니다.
+- 화면이 꺼진 상태의 1분 간격 자동 감시는 functions/watchBusAlerts 배포가 필요합니다.
+- Firebase 콘솔에 Spark 요금제로 표시된다면 Cloud Functions를 새로 배포할 수 없습니다. 백그라운드 자동 감시를 사용하려면 Blaze 요금제로 전환하고 예산 알림을 설정해야 합니다.
+- 예약 함수는 Cloud Scheduler를 사용합니다.
 
-참고
-- 이번 v1.5에서는 익명 로그인이 꺼져 있어도 실시간 지도와 앱을 열어둔 동안의 로컬 알림은 계속 동작합니다.
-- 화면이 꺼진 상태에서도 1분 간격으로 버스를 감시하려면 functions/watchBusAlerts가 배포되어야 합니다.
-- 예약 함수는 Cloud Scheduler를 사용하므로 Firebase 결제 설정이 필요할 수 있습니다.
+배포 명령
+npm install -g firebase-tools
+firebase login
+cp .firebaserc.example .firebaserc
+# .firebaserc에 bus 프로젝트 ID 입력
+cd functions
+npm install
+cd ..
+firebase functions:secrets:set GBIS_SERVICE_KEY
+firebase deploy --only functions,firestore:rules
+
+v1.7 변경
+- 공식 도착정보가 없는 출발 종점에서도 stationSeq·turnSeq를 이용해 회차 후 돌아오는 차량을 계산합니다.
+- 기존에 저장한 알림에는 새 노선 회차정보가 없으므로 앱에서 반드시 다시 저장하세요.
