@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="theme-color" content="#071326" />
+  <meta name="theme-color" content="#0b67e3" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="apple-mobile-web-app-title" content="버스알림" />
   <meta name="format-detection" content="telephone=no" />
   <title>우리 버스 알림</title>
@@ -14,293 +14,133 @@
   <link rel="icon" type="image/png" href="/icons/favicon.png" />
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
-  <link rel="stylesheet" href="/styles.css?v=2.8.0" />
+  <link rel="stylesheet" href="/styles.css?v=2.9.0" />
 </head>
 <body>
-  <div class="app-shell">
-    <header class="hero">
-      <div class="hero-orb hero-orb-one"></div>
-      <div class="hero-orb hero-orb-two"></div>
-      <div class="radar-grid" aria-hidden="true"></div>
-
-      <div class="hero-inner">
-        <div class="brand-row">
-          <div class="brand-mark">
-            <img src="/assets/logo-symbol.png" alt="우리 버스 알림" />
-          </div>
-          <div class="brand-copy">
-            <span class="brand-kicker">SMART BUS SIGNAL</span>
-            <h1>우리 버스 알림</h1>
-          </div>
-          <div class="live-pill">
-            <span class="pulse"></span>
-            <span id="apiState">연결 확인 중</span>
-          </div>
-        </div>
-
-        <div class="hero-message">
-          <span class="route-label">호계 e편한세상 → 평촌</span>
-          <h2>버스 도착을<br><em>미리 알려드려요.</em></h2>
-          <p>노선·실시간 위치·도착 알림을 한 화면에서 확인하세요.</p>
-        </div>
-
-        <div class="hero-stats" aria-label="앱 주요 기능">
-          <div><strong>LIVE</strong><span>실시간 위치</span></div>
-          <div><strong>3 STOP</strong><span>도착 전 알림</span></div>
-          <div><strong>24/7</strong><span>자동 감시</span></div>
-        </div>
+  <div class="app-shell simple-app">
+    <header class="simple-header">
+      <div class="simple-brand">
+        <img src="/assets/logo-symbol.png" alt="" />
+        <div><h1>우리 버스</h1><p>출발지부터 도착지까지 한 번에</p></div>
       </div>
+      <div class="simple-api"><span class="pulse"></span><span id="apiState">연결 확인 중</span></div>
     </header>
 
-    <main>
-      <section class="card route-card">
-        <div class="section-heading">
-          <div>
-            <span class="section-kicker">ROUTE PLANNER</span>
-            <h2>어디로 갈까요?</h2>
-          </div>
-          <button class="icon-button" id="swapStops" aria-label="출발·도착 바꾸기">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7h11m0 0-3-3m3 3-3 3M17 17H6m0 0 3 3m-3-3 3-3"/></svg>
+    <main class="simple-main">
+      <section class="card route-card simple-route-card">
+        <div class="simple-title-row">
+          <div><span class="step-eyebrow">경로 선택</span><h2>어디로 갈까요?</h2></div>
+          <button type="button" class="small-icon-button" id="swapStops" aria-label="출발·도착 바꾸기">
+            <svg viewBox="0 0 24 24"><path d="M7 7h11m0 0-3-3m3 3-3 3M17 17H6m0 0 3 3m-3-3 3-3"/></svg>
           </button>
         </div>
 
-        <div class="preset-row" role="group" aria-label="목적지 빠른 선택">
-          <button class="preset active" data-destination="평촌고">
-            <span class="preset-icon school-icon"><svg viewBox="0 0 24 24"><path d="m3 10 9-6 9 6-9 6-9-6Zm3 3v5m12-5v5M8 20h8"/></svg></span>
-            <span><b>평촌고</b><small>학교</small></span>
-          </button>
-          <button class="preset" data-destination="평촌학원가.먹자거리">
-            <span class="preset-icon academy-icon"><svg viewBox="0 0 24 24"><path d="M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2V4Zm3 4h8M8 12h8M8 16h5"/></svg></span>
-            <span><b>평촌학원가</b><small>학원·상권</small></span>
-          </button>
-        </div>
-
-        <div class="journey-panel">
-          <div class="journey-line" aria-hidden="true">
-            <span class="journey-dot origin-dot"></span>
-            <span class="journey-track"></span>
-            <span class="journey-dot destination-dot"></span>
+        <div class="favorite-quick-panel">
+          <div class="favorite-quick-head">
+            <strong>즐겨찾기</strong>
+            <span><b id="destinationFavoriteCount">0개</b> / 최대 5개</span>
           </div>
-
-          <div class="stop-picker origin-picker">
-            <div class="picker-title-row">
-              <label for="originInput"><span>출발</span> 타는 정류장</label>
-              <button type="button" class="location-button" id="nearbyOrigin">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 22s7-6 7-13a7 7 0 1 0-14 0c0 7 7 13 7 13Zm0-10a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg>
-                내 주변 정류장
-              </button>
-            </div>
-            <div class="search-line">
-              <div class="input-wrap">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 21s6-5.2 6-11a6 6 0 1 0-12 0c0 5.8 6 11 6 11Zm0-8.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/></svg>
-                <input id="originInput" value="호계현대홈타운.e편한세상아파트" autocomplete="off" />
-              </div>
-              <button class="search-button" id="originSearch" aria-label="출발 정류장 검색">
-                <svg viewBox="0 0 24 24"><path d="m21 21-4.2-4.2m2.2-5.3a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"/></svg>
-              </button>
-            </div>
-            <div class="suggestions" id="originSuggestions"></div>
-            <div class="nearby-status" id="nearbyStatus" aria-live="polite">내 위치 버튼을 누르면 현재 좌표를 먼저 조회하고, 필요할 때만 주변 좌표를 재검색합니다.</div>
-            <div class="selected-stop" id="originSelected">정류장을 검색해 실제 탑승 방향을 선택하세요.</div>
-          </div>
-
-          <div class="journey-divider"></div>
-
-          <div class="stop-picker destination-picker">
-            <label for="destinationInput"><span>도착</span> 내릴 정류장</label>
-            <div class="search-line">
-              <div class="input-wrap">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 21V5m0 1h11l-2 3 2 3H5"/></svg>
-                <input id="destinationInput" value="평촌고" autocomplete="off" />
-              </div>
-              <button class="search-button" id="destinationSearch" aria-label="도착 정류장 검색">
-                <svg viewBox="0 0 24 24"><path d="m21 21-4.2-4.2m2.2-5.3a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"/></svg>
-              </button>
-            </div>
-            <div class="suggestions" id="destinationSuggestions"></div>
-            <div class="selected-stop" id="destinationSelected">목적지 정류장을 선택하세요.</div>
-            <div class="destination-favorite-bar">
-              <button type="button" class="favorite-toggle-button" id="toggleDestinationFavorite" disabled><span aria-hidden="true">☆</span> 즐겨찾기 저장</button>
-              <span id="favoriteDestinationHint">도착 정류장을 선택하면 저장할 수 있습니다.</span>
-            </div>
-            <div class="favorite-destination-panel">
-              <div class="favorite-destination-heading"><strong>도착지 즐겨찾기</strong><b id="destinationFavoriteCount">0개</b></div>
-              <div class="favorite-destinations" id="destinationFavorites"><div class="empty favorite-empty">저장된 도착지가 없습니다.</div></div>
-            </div>
+          <div class="favorite-destinations quick-favorites" id="destinationFavorites">
+            <div class="empty favorite-empty">자주 가는 도착지를 최대 5곳 저장할 수 있습니다.</div>
           </div>
         </div>
 
-        <button class="primary full route-search-cta" id="findRoutes">
-          <span id="findRoutesLabel">직행 버스 찾기</span>
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>
+        <div class="simple-step origin-step">
+          <div class="step-label"><b>1</b><span>출발지</span></div>
+          <div class="simple-search-row">
+            <div class="input-wrap simple-input-wrap">
+              <svg viewBox="0 0 24 24"><path d="M12 21s6-5.2 6-11a6 6 0 1 0-12 0c0 5.8 6 11 6 11Zm0-8.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/></svg>
+              <input id="originInput" value="호계현대홈타운.e편한세상아파트" placeholder="출발 정류장 검색" autocomplete="off" />
+            </div>
+            <button class="search-button" id="originSearch" aria-label="출발 정류장 검색"><svg viewBox="0 0 24 24"><path d="m21 21-4.2-4.2m2.2-5.3a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"/></svg></button>
+          </div>
+          <button type="button" class="nearby-simple-button" id="nearbyOrigin">
+            <svg viewBox="0 0 24 24"><path d="M12 22s7-6 7-13a7 7 0 1 0-14 0c0 7 7 13 7 13Zm0-10a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"/></svg>
+            내 위치 주변 정류장
+          </button>
+          <div class="nearby-status" id="nearbyStatus" aria-live="polite"></div>
+          <div class="suggestions simple-suggestions" id="originSuggestions"></div>
+          <div class="selected-stop simple-selected" id="originSelected">출발 정류장을 선택하세요.</div>
+        </div>
+
+        <div class="simple-step destination-step">
+          <div class="step-label"><b>2</b><span>도착지</span></div>
+          <p class="direction-help" id="directionStatus">출발지를 선택하면 그 방향으로 갈 수 있는 정류장만 보여드립니다.</p>
+          <div class="simple-search-row">
+            <div class="input-wrap simple-input-wrap">
+              <svg viewBox="0 0 24 24"><path d="M5 21V5m0 1h11l-2 3 2 3H5"/></svg>
+              <input id="destinationInput" placeholder="가는 방향 정류장 검색" autocomplete="off" disabled />
+            </div>
+            <button class="search-button" id="destinationSearch" aria-label="도착 정류장 찾기" disabled><svg viewBox="0 0 24 24"><path d="m21 21-4.2-4.2m2.2-5.3a7.5 7.5 0 1 1-15 0 7.5 7.5 0 0 1 15 0Z"/></svg></button>
+          </div>
+          <div class="suggestions simple-suggestions direction-suggestions" id="destinationSuggestions"></div>
+          <div class="selected-stop simple-selected" id="destinationSelected">도착 정류장을 선택하세요.</div>
+          <div class="favorite-save-row">
+            <button type="button" class="favorite-toggle-button" id="toggleDestinationFavorite" disabled><span aria-hidden="true">☆</span> 즐겨찾기 저장</button>
+            <span id="favoriteDestinationHint">도착지를 선택하면 저장할 수 있습니다.</span>
+          </div>
+        </div>
+
+        <button class="primary full simple-find-button" id="findRoutes" disabled>
+          <span id="findRoutesLabel">버스 찾기</span>
+          <svg viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>
         </button>
         <div class="route-results" id="routeResults"></div>
       </section>
 
       <section class="card live-card hidden" id="liveSection">
-        <div class="section-heading">
-          <div>
-            <span class="section-kicker">LIVE TRACKING</span>
-            <h2>실시간 버스</h2>
-          </div>
-          <button class="secondary compact" id="refreshLive">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M6.1 8A7 7 0 0 1 18 6l2 1M4 17l2 1a7 7 0 0 0 11.9-2"/></svg>
-            <span id="refreshLiveLabel">새로고침</span>
-          </button>
+        <div class="section-heading compact-heading">
+          <div><span class="section-kicker">실시간</span><h2>버스 위치</h2></div>
+          <button class="secondary compact" id="refreshLive"><svg viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5M6.1 8A7 7 0 0 1 18 6l2 1M4 17l2 1a7 7 0 0 0 11.9-2"/></svg><span id="refreshLiveLabel">새로고침</span></button>
         </div>
-
         <div class="chosen-route" id="chosenRoute"></div>
         <div class="arrival-grid" id="arrivalGrid"></div>
-        <div class="live-vehicle-heading"><strong>운행 차량</strong><span id="liveUpdated">실시간 정보 대기 중</span></div>
-        <div class="live-vehicles" id="liveVehicles"><div class="empty">버스를 선택하면 오는 차량과 전체 운행 차량을 표시합니다.</div></div>
+        <div class="live-vehicle-heading"><strong>운행 차량</strong><span id="liveUpdated">정보 대기 중</span></div>
+        <div class="live-vehicles" id="liveVehicles"><div class="empty">버스를 선택하면 표시됩니다.</div></div>
         <div class="map-frame">
           <div id="map" aria-label="실시간 버스 위치 지도"></div>
           <div class="map-control-stack">
-            <div class="map-scope-control" role="group" aria-label="지도 표시 범위">
-              <button type="button" class="active" data-map-scope="full">전체 노선</button>
-              <button type="button" data-map-scope="journey">탑승 구간</button>
-            </div>
-            <div class="map-vehicle-control" role="group" aria-label="버스 표시 기준">
-              <button type="button" data-vehicle-scope="approaching">오는 버스</button>
-              <button type="button" class="active" data-vehicle-scope="all">전체 차량</button>
-            </div>
+            <div class="map-scope-control" role="group"><button type="button" class="active" data-map-scope="full">전체</button><button type="button" data-map-scope="journey">탑승 구간</button></div>
+            <div class="map-vehicle-control" role="group"><button type="button" data-vehicle-scope="approaching">오는 버스</button><button type="button" class="active" data-vehicle-scope="all">전체 차량</button></div>
           </div>
-          <div class="map-live-chip"><span class="pulse"></span><span id="busCount">운행 차량 확인 중</span></div>
+          <div class="map-live-chip"><span class="pulse"></span><span id="busCount">확인 중</span></div>
         </div>
-        <div class="map-legend" aria-label="지도 범례">
-          <span><i class="legend-line approach"></i>내 정류장으로 오는 구간</span>
-          <span><i class="legend-line journey"></i>탑승 후 이동 구간</span>
-          <span><i class="legend-bus"></i>운행 버스 · 노선번호/차량번호</span>
-        </div>
-        <p class="map-note" id="mapNote">빨간선은 내 정류장으로 오는 구간, 노란선은 탑승 후 목적지까지 이동할 구간입니다.</p>
+        <div class="map-legend"><span><i class="legend-line approach"></i>오는 구간</span><span><i class="legend-line journey"></i>이동 구간</span><span><i class="legend-bus"></i>버스</span></div>
+        <p class="map-note" id="mapNote">빨간선은 탑승 정류장까지, 노란선은 목적지까지입니다.</p>
       </section>
 
       <section class="card alert-card hidden" id="alertSection">
-        <div class="section-heading">
-          <div>
-            <span class="section-kicker">SMART ALERT</span>
-            <h2>도착 알림 설정</h2>
-          </div>
+        <div class="section-heading compact-heading">
+          <div><span class="section-kicker">알림</span><h2>도착 알림</h2></div>
           <span class="status-badge" id="pushState">미설정</span>
         </div>
-
-        <div class="alert-highlight">
-          <div class="alert-icon">
-            <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM9 21h6"/></svg>
-          </div>
-          <div><strong>원하는 시간에만 자동 감시</strong><span>앱을 닫아도 설정한 조건에 맞으면 알려드립니다.</span></div>
-        </div>
-
-        <div class="alert-route-chip" id="alertRouteChip">버스를 선택하면 해당 번호의 알림을 따로 저장할 수 있습니다.</div>
-
+        <div class="alert-route-chip" id="alertRouteChip">버스를 선택하세요.</div>
         <div class="form-grid two time-grid">
           <label class="time-field"><span>시작</span><input type="time" id="startTime" value="15:00" /></label>
           <label class="time-field"><span>종료</span><input type="time" id="endTime" value="23:00" /></label>
         </div>
-
-        <div class="field-block">
-          <span class="field-label">알림 요일</span>
+        <div class="field-block compact-field-block">
+          <span class="field-label">요일</span>
           <div class="day-row" id="dayRow">
-            <button data-day="1" class="day active">월</button>
-            <button data-day="2" class="day active">화</button>
-            <button data-day="3" class="day active">수</button>
-            <button data-day="4" class="day active">목</button>
-            <button data-day="5" class="day active">금</button>
-            <button data-day="6" class="day">토</button>
-            <button data-day="0" class="day">일</button>
+            <button data-day="1" class="day active">월</button><button data-day="2" class="day active">화</button><button data-day="3" class="day active">수</button><button data-day="4" class="day active">목</button><button data-day="5" class="day active">금</button><button data-day="6" class="day">토</button><button data-day="0" class="day">일</button>
           </div>
         </div>
-
-        <div class="form-grid alert-option-grid">
-          <label><span>알림 시점</span>
-            <select id="leadStops">
-              <option value="1">1정거장 전</option>
-              <option value="2">2정거장 전</option>
-              <option value="3" selected>3정거장 전</option>
-              <option value="4">4정거장 전</option>
-              <option value="5">5정거장 전</option>
-            </select>
-          </label>
-          <label><span>알림 방식</span>
-            <select id="alertMode">
-              <option value="push">소리·진동·푸시</option>
-              <option value="soundPush">소리·푸시</option>
-              <option value="vibratePush">진동·푸시</option>
-              <option value="pushOnly">푸시만</option>
-            </select>
-          </label>
-          <label><span>알림 소리</span>
-            <select id="alertSound">
-              <option value="standard">기본 알림음</option>
-              <option value="bright">경쾌한 알림음</option>
-              <option value="urgent">긴급 알림음</option>
-              <option value="soft">부드러운 알림음</option>
-              <option value="chime">차임 알림음</option>
-              <option value="futureBus">미래형 버스 알림음</option>
-              <option value="silent">무음</option>
-            </select>
-          </label>
+        <div class="form-grid alert-option-grid simple-alert-options">
+          <label><span>알림 시점</span><select id="leadStops"><option value="1">1정거장 전</option><option value="2">2정거장 전</option><option value="3" selected>3정거장 전</option><option value="4">4정거장 전</option><option value="5">5정거장 전</option></select></label>
+          <label><span>방식</span><select id="alertMode"><option value="push">소리·진동·푸시</option><option value="soundPush">소리·푸시</option><option value="vibratePush">진동·푸시</option><option value="pushOnly">푸시만</option></select></label>
+          <label><span>소리</span><select id="alertSound"><option value="standard">기본 알림음</option><option value="bright">경쾌한 알림음</option><option value="urgent">긴급 알림음</option><option value="soft">부드러운 알림음</option><option value="chime">차임 알림음</option><option value="futureBus">미래형 버스 알림음</option><option value="silent">무음</option></select></label>
         </div>
-
-        <label class="toggle-line">
-          <input type="checkbox" id="alertEnabled" checked />
-          <span class="toggle-ui"></span>
-          <span class="toggle-copy"><strong>자동 감시 사용</strong><small>설정한 시간대에 버스 도착을 확인합니다.</small></span>
-        </label>
-
-        <div class="alert-actions">
-          <button type="button" class="primary" id="saveAlert">선택 버스 알림 저장</button>
-          <button type="button" class="secondary" id="testAlert">
-            <svg viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Zm4 4a4 4 0 0 1 0 6m2-8a7 7 0 0 1 0 10"/></svg>
-            알림 테스트
-          </button>
-        </div>
-        <div class="info-box" id="alertInfo">저장 버튼을 누르면 먼저 이 기기에 저장합니다. 푸시가 준비되면 Firebase에도 이어서 저장합니다.</div>
-
-        <div class="saved-alert-panel">
-          <div class="saved-alert-heading">
-            <div><strong>버스번호별 저장 알림</strong><span>버스마다 시간과 요일을 따로 저장합니다.</span></div>
-            <b id="savedAlertCount">0개</b>
-          </div>
-          <div class="saved-alerts" id="savedAlerts"><div class="empty compact-empty">저장된 버스 알림이 없습니다.</div></div>
-        </div>
-      </section>
-
-      <section class="card help-card">
-        <div class="help-icon"><svg viewBox="0 0 24 24"><path d="M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Zm0-6v.01M9.7 9a2.4 2.4 0 1 1 3.9 1.9c-1 .7-1.6 1.1-1.6 2.1"/></svg></div>
-        <div>
-          <span class="section-kicker">QUICK GUIDE</span>
-          <h2>처음 사용하시나요?</h2>
-          <ol>
-            <li>‘내 주변 정류장’ 또는 이름 검색으로 실제 탑승 방향을 선택합니다.</li>
-            <li>직행 노선을 고르면 실시간 위치와 도착정보가 표시됩니다.</li>
-            <li>버스번호별 시간·요일·알림 소리를 정해 저장합니다.</li>
-          </ol>
-        </div>
+        <label class="toggle-line compact-toggle"><input type="checkbox" id="alertEnabled" checked /><span class="toggle-ui"></span><span class="toggle-copy"><strong>자동 감시</strong><small>설정 시간에 도착을 확인합니다.</small></span></label>
+        <div class="alert-actions"><button type="button" class="primary" id="saveAlert">알림 저장</button><button type="button" class="secondary" id="testAlert">알림 테스트</button></div>
+        <div class="info-box" id="alertInfo">설정은 먼저 이 기기에 저장됩니다.</div>
+        <div class="saved-alert-panel"><div class="saved-alert-heading"><div><strong>저장 알림</strong><span>버스번호별 설정</span></div><b id="savedAlertCount">0개</b></div><div class="saved-alerts" id="savedAlerts"><div class="empty compact-empty">저장된 알림이 없습니다.</div></div></div>
       </section>
     </main>
-
-    <nav class="bottom-nav" aria-label="빠른 이동">
-      <button data-scroll="route-card" class="active">
-        <svg viewBox="0 0 24 24"><path d="M6 17h12M7 4h10a3 3 0 0 1 3 3v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7a3 3 0 0 1 3-3Zm-1 9h12M8 8h8M7 21v-3m10 3v-3"/></svg>
-        <span>노선</span>
-      </button>
-      <button data-scroll="liveSection">
-        <svg viewBox="0 0 24 24"><path d="M12 21s6-5.2 6-11a6 6 0 1 0-12 0c0 5.8 6 11 6 11Zm0-8.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z"/></svg>
-        <span>실시간</span>
-      </button>
-      <button data-scroll="alertSection">
-        <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM9 21h6"/></svg>
-        <span>알림</span>
-      </button>
-    </nav>
   </div>
 
   <div class="toast" id="toast" role="status"></div>
   <audio id="alarmAudio" preload="auto"></audio>
-
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
-
-  <script type="module" src="/app.js?v=2.8.0"></script>
+  <script type="module" src="/app.js?v=2.9.0"></script>
 </body>
 </html>

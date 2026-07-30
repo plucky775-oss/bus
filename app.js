@@ -50,7 +50,12 @@ const state = {
   foregroundBaselineReady: false,
   futureBusAudioBuffer: null,
   futureBusAudioBufferPromise: null,
-  restoreBusy: false
+  restoreBusy: false,
+  directionDestinations: [],
+  directionRoutes: [],
+  directionLoading: false,
+  directionLoadId: 0,
+  directionAbortController: null
 };
 
 const els = {
@@ -65,7 +70,8 @@ const els = {
   nearbyStatus: $('nearbyStatus'), liveVehicles: $('liveVehicles'), liveUpdated: $('liveUpdated'),
   savedAlerts: $('savedAlerts'), savedAlertCount: $('savedAlertCount'), alertRouteChip: $('alertRouteChip'),
   destinationFavorites: $('destinationFavorites'), destinationFavoriteCount: $('destinationFavoriteCount'),
-  toggleDestinationFavorite: $('toggleDestinationFavorite'), favoriteDestinationHint: $('favoriteDestinationHint')
+  toggleDestinationFavorite: $('toggleDestinationFavorite'), favoriteDestinationHint: $('favoriteDestinationHint'),
+  directionStatus: $('directionStatus')
 };
 
 const DESTINATION_WALK_RADIUS_METERS = 800;
@@ -76,6 +82,8 @@ const DESTINATION_FAVORITES_KEY = 'hogyeBusDestinationFavoritesV1';
 const LAST_JOURNEY_KEY = 'hogyeBusLastJourneyV1';
 const LAST_SELECTED_ALERT_KEY = 'hogyeBusLastSelectedAlertV1';
 const PUSH_CONNECT_TIMEOUT_MS = 10000;
+const MAX_DESTINATION_FAVORITES = 5;
+const MAX_DIRECTION_RESULTS = 80;
 
 function isAppleMobileBrowser() {
   const ua = navigator.userAgent || '';
@@ -587,14 +595,16 @@ function readDestinationFavorites() {
       const key = destinationFavoriteKey(station);
       if (key && station?.stationName) unique.set(key, { key, station, savedAt: number(item?.savedAt, 0) });
     });
-    return [...unique.values()].sort((a, b) => number(b.savedAt, 0) - number(a.savedAt, 0));
+    return [...unique.values()]
+      .sort((a, b) => number(b.savedAt, 0) - number(a.savedAt, 0))
+      .slice(0, MAX_DESTINATION_FAVORITES);
   } catch {
     return [];
   }
 }
 
 function writeDestinationFavorites(items) {
-  state.destinationFavorites = [...items];
+  state.destinationFavorites = [...items].slice(0, MAX_DESTINATION_FAVORITES);
   localStorage.setItem(DESTINATION_FAVORITES_KEY, JSON.stringify(state.destinationFavorites));
   renderDestinationFavorites();
   updateDestinationFavoriteControl();
@@ -604,15 +614,20 @@ function updateDestinationFavoriteControl() {
   if (!els.toggleDestinationFavorite) return;
   const key = destinationFavoriteKey(state.destination);
   const saved = Boolean(key && state.destinationFavorites.some(item => item.key === key));
-  els.toggleDestinationFavorite.disabled = !state.destination;
+  const atLimit = !saved && state.destinationFavorites.length >= MAX_DESTINATION_FAVORITES;
+  els.toggleDestinationFavorite.disabled = !state.destination || atLimit;
   els.toggleDestinationFavorite.classList.toggle('saved', saved);
   els.toggleDestinationFavorite.innerHTML = saved
     ? '<span aria-hidden="true">★</span> 즐겨찾기 해제'
     : '<span aria-hidden="true">☆</span> 즐겨찾기 저장';
   if (els.favoriteDestinationHint) {
     els.favoriteDestinationHint.textContent = !state.destination
-      ? '도착 정류장을 선택하면 저장할 수 있습니다.'
-      : saved ? '이 도착지는 즐겨찾기에 저장되어 있습니다.' : '자주 가는 도착지를 한 번에 불러올 수 있습니다.';
+      ? `도착지를 선택하면 최대 ${MAX_DESTINATION_FAVORITES}곳까지 저장할 수 있습니다.`
+      : saved
+        ? '저장된 도착지입니다.'
+        : atLimit
+          ? `즐겨찾기 ${MAX_DESTINATION_FAVORITES}곳이 모두 찼습니다.`
+          : `${state.destinationFavorites.length}/${MAX_DESTINATION_FAVORITES} 저장됨`;
   }
 }
 
@@ -652,9 +667,12 @@ function toggleDestinationFavorite() {
       toast(`${state.destination.stationName} 즐겨찾기를 해제했습니다.`);
     } else {
       const next = state.destinationFavorites.filter(item => item.key !== key);
+      if (state.destinationFavorites.length >= MAX_DESTINATION_FAVORITES) {
+        return toast(`즐겨찾기는 최대 ${MAX_DESTINATION_FAVORITES}곳까지 저장할 수 있습니다.`, 3600);
+      }
       next.unshift({ key, station: compactFavoriteStation(state.destination), savedAt: Date.now() });
-      writeDestinationFavorites(next.slice(0, 12));
-      toast(`${state.destination.stationName}을 도착지 즐겨찾기에 저장했습니다.`);
+      writeDestinationFavorites(next.slice(0, MAX_DESTINATION_FAVORITES));
+      toast(`${state.destination.stationName}을 즐겨찾기에 저장했습니다.`);
     }
   } catch (error) {
     toast(`즐겨찾기 저장 실패: ${error.message}`, 4000);
@@ -664,9 +682,13 @@ function toggleDestinationFavorite() {
 function useDestinationFavorite(key) {
   const item = state.destinationFavorites.find(favorite => favorite.key === key);
   if (!item) return;
-  document.querySelectorAll('.preset').forEach(button => button.classList.remove('active'));
-  selectStation('destination', { ...item.station });
-  toast(`${item.station.stationName}을 도착지로 불러왔습니다.`);
+  if (!state.origin) return toast('즐겨찾기를 사용하려면 출발지를 먼저 선택해 주세요.');
+  if (state.directionLoading) return toast('가는 방향을 확인하는 중입니다. 잠시만 기다려 주세요.');
+  const reachable = state.directionDestinations.find(station => sameId(station.stationId, item.station.stationId)
+    || directionStationKey(station) === directionStationKey(item.station));
+  if (!reachable) return toast(`${item.station.stationName}은 현재 출발지에서 바로 가는 방향에 없습니다.`, 4200);
+  selectStation('destination', { ...reachable });
+  toast(`${item.station.stationName}을 도착지로 선택했습니다.`);
 }
 
 function removeDestinationFavorite(key) {
@@ -677,6 +699,228 @@ function removeDestinationFavorite(key) {
     toast(`${item.station.stationName} 즐겨찾기를 삭제했습니다.`);
   } catch (error) {
     toast(`즐겨찾기 삭제 실패: ${error.message}`, 4000);
+  }
+}
+
+
+function directionStationKey(station) {
+  if (!station) return '';
+  const coordinate = stationCoordinate(station);
+  return String(station.stationId || `${normalizeName(station.stationName)}:${coordinate ? `${coordinate.lat.toFixed(5)}:${coordinate.lng.toFixed(5)}` : ''}`);
+}
+
+function clearDirectionalDestinations(message = '출발지를 선택하면 그 방향으로 갈 수 있는 정류장만 보여드립니다.') {
+  state.directionAbortController?.abort();
+  state.directionAbortController = null;
+  state.directionDestinations = [];
+  state.directionRoutes = [];
+  state.directionLoading = false;
+  if (els.directionStatus) els.directionStatus.textContent = message;
+  if (els.destinationInput) {
+    els.destinationInput.disabled = true;
+    els.destinationInput.placeholder = '먼저 출발지를 선택하세요';
+  }
+  const destinationSearch = $('destinationSearch');
+  if (destinationSearch) destinationSearch.disabled = true;
+  if (els.destinationSuggestions) els.destinationSuggestions.innerHTML = '';
+  updateFindRoutesButton();
+}
+
+function updateFindRoutesButton() {
+  const button = $('findRoutes');
+  if (!button) return;
+  button.disabled = !(state.origin && state.destination);
+}
+
+function destinationIsReachable(station) {
+  const key = directionStationKey(station);
+  if (!key) return false;
+  return state.directionDestinations.some(item => directionStationKey(item) === key || sameId(item.stationId, station.stationId));
+}
+
+function renderDirectionalSuggestions(keyword = '') {
+  const listEl = els.destinationSuggestions;
+  if (!listEl) return;
+  if (!state.origin) {
+    listEl.innerHTML = '<div class="empty">출발지를 먼저 선택하세요.</div>';
+    return;
+  }
+  if (state.directionLoading) {
+    listEl.innerHTML = '<div class="empty">가는 방향의 정류장을 불러오는 중…</div>';
+    return;
+  }
+  const normalizedKeyword = normalizeName(keyword);
+  const filtered = state.directionDestinations
+    .filter(item => !normalizedKeyword || normalizeName(item.stationName).includes(normalizedKeyword) || String(item.mobileNo || '').includes(keyword.trim()))
+    .slice(0, MAX_DIRECTION_RESULTS);
+  if (!filtered.length) {
+    listEl.innerHTML = `<div class="empty">${keyword.trim() ? '가는 방향에서 일치하는 정류장이 없습니다.' : '이 출발지에서 갈 수 있는 정류장을 찾지 못했습니다.'}</div>`;
+    return;
+  }
+  listEl.innerHTML = filtered.map((station, index) => {
+    const routeNames = Array.isArray(station._routeNames) ? station._routeNames.slice(0, 4).join(', ') : '';
+    const more = number(station._routeCount, 0) > 4 ? ` 외 ${number(station._routeCount) - 4}` : '';
+    const meta = [
+      Number.isFinite(number(station._minStops, NaN)) ? `${number(station._minStops)}정거장 후` : '',
+      routeNames ? `${routeNames}${more}` : '',
+      station.mobileNo ? `정류소 ${station.mobileNo}` : ''
+    ].filter(Boolean).join(' · ');
+    return `<button class="suggestion direction-suggestion" data-direction-index="${index}">
+      <strong>${esc(station.stationName)}</strong>
+      <span>${esc(meta || '가는 방향 정류장')}</span>
+    </button>`;
+  }).join('');
+  listEl.querySelectorAll('[data-direction-index]').forEach(button => {
+    button.addEventListener('click', () => selectStation('destination', filtered[Number(button.dataset.directionIndex)]));
+  });
+}
+
+function routeOriginMatches(ordered, route) {
+  let matches = ordered.filter(stop => routeStopMatchesSelection(stop, state.origin));
+  if (!matches.length) matches = ordered.filter(stop => routeStopMatchesSelection(stop, state.origin, { allowCoordinateFallback: true }));
+  const expected = (route?._originOrders || [route?.staOrder]).map(value => number(value, NaN)).filter(Number.isFinite);
+  if (!expected.length || !matches.length) return matches;
+  const selected = [];
+  expected.forEach(order => {
+    const closest = [...matches].sort((a, b) => Math.abs(routeStationSequence(a) - order) - Math.abs(routeStationSequence(b) - order))[0];
+    if (closest && !selected.some(item => routeStationSequence(item) === routeStationSequence(closest))) selected.push(closest);
+  });
+  return selected.length ? selected : matches;
+}
+
+async function loadDirectionalDestinations({ preserveDestination = true, silent = false } = {}) {
+  if (!state.origin) return clearDirectionalDestinations();
+  state.directionAbortController?.abort();
+  const controller = new AbortController();
+  state.directionAbortController = controller;
+  const loadId = ++state.directionLoadId;
+  state.directionLoading = true;
+  state.directionDestinations = [];
+  if (els.destinationInput) {
+    els.destinationInput.disabled = true;
+    els.destinationInput.placeholder = '가는 방향을 확인하는 중…';
+  }
+  const destinationSearch = $('destinationSearch');
+  if (destinationSearch) destinationSearch.disabled = true;
+  if (els.directionStatus) els.directionStatus.textContent = `${state.origin.stationName}에서 갈 수 있는 정류장을 확인하고 있습니다…`;
+  renderDirectionalSuggestions();
+
+  try {
+    const originData = await apiWithRetry('stationRoutes', { stationId: state.origin.stationId }, { signal: controller.signal, fresh: true, timeout: 20000 }, 2);
+    if (loadId !== state.directionLoadId) return;
+    const groups = new Map();
+    (originData.items || []).forEach(rawRoute => {
+      const routeId = String(rawRoute.routeId || '').trim();
+      if (!routeId) return;
+      const existing = groups.get(routeId);
+      if (existing) {
+        existing._originOrders.push(rawRoute.staOrder);
+        return;
+      }
+      groups.set(routeId, { ...rawRoute, routeId, _originOrders: [rawRoute.staOrder] });
+    });
+    const routes = [...groups.values()];
+    state.directionRoutes = routes;
+    if (!routes.length) throw new Error('이 정류장에 정차하는 경기버스 노선이 없습니다.');
+
+    const destinations = new Map();
+    let completed = 0;
+    await mapWithConcurrency(routes, 4, async route => {
+      if (controller.signal.aborted) return;
+      try {
+        const stationData = await apiWithRetry('routeStations', { routeId: route.routeId }, { signal: controller.signal, fresh: false, timeout: 20000 }, 2);
+        const ordered = (stationData.items || [])
+          .map(normalizeRouteStation)
+          .filter(stop => Number.isFinite(routeStationSequence(stop)))
+          .sort((a, b) => routeStationSequence(a) - routeStationSequence(b));
+        const origins = routeOriginMatches(ordered, route);
+        origins.forEach(originStop => {
+          const originSeq = routeStationSequence(originStop);
+          ordered.forEach(stop => {
+            const seq = routeStationSequence(stop);
+            if (!Number.isFinite(seq) || seq <= originSeq || sameId(stop.stationId, state.origin.stationId)) return;
+            const key = directionStationKey(stop);
+            if (!key) return;
+            const stopCount = seq - originSeq;
+            const existing = destinations.get(key);
+            if (!existing) {
+              destinations.set(key, {
+                ...stop,
+                stationId: String(stop.stationId || ''),
+                stationName: stop.stationName || '',
+                _minStops: stopCount,
+                _routeIds: new Set([route.routeId]),
+                _routeNames: new Set([String(route.routeName || route.routeNo || '').trim()].filter(Boolean))
+              });
+            } else {
+              existing._minStops = Math.min(number(existing._minStops, stopCount), stopCount);
+              existing._routeIds.add(route.routeId);
+              const routeName = String(route.routeName || route.routeNo || '').trim();
+              if (routeName) existing._routeNames.add(routeName);
+            }
+          });
+        });
+      } catch (error) {
+        if (error?.name === 'AbortError') throw error;
+        console.warn('direction route stations failed', route.routeId, error);
+      } finally {
+        completed += 1;
+        if (els.directionStatus && loadId === state.directionLoadId && completed < routes.length) {
+          els.directionStatus.textContent = `가는 방향 확인 중 · ${completed}/${routes.length}개 노선`;
+        }
+      }
+    });
+    if (loadId !== state.directionLoadId) return;
+
+    state.directionDestinations = [...destinations.values()]
+      .map(item => ({
+        ...item,
+        _routeCount: item._routeIds.size,
+        _routeIds: [...item._routeIds],
+        _routeNames: [...item._routeNames].sort((a, b) => a.localeCompare(b, 'ko-KR', { numeric: true }))
+      }))
+      .sort((a, b) => number(a._minStops, Infinity) - number(b._minStops, Infinity) || String(a.stationName).localeCompare(String(b.stationName), 'ko-KR'));
+
+    if (els.destinationInput) {
+      els.destinationInput.disabled = false;
+      els.destinationInput.placeholder = '정류장 이름으로 좁혀보기';
+    }
+    if (destinationSearch) destinationSearch.disabled = false;
+    if (els.directionStatus) els.directionStatus.textContent = `${routes.length}개 노선에서 갈 수 있는 정류장 ${state.directionDestinations.length}개`;
+    state.directionLoading = false;
+
+    if (state.destination && preserveDestination) {
+      const matched = state.directionDestinations.find(item => sameId(item.stationId, state.destination.stationId) || directionStationKey(item) === directionStationKey(state.destination));
+      if (matched) {
+        state.destination = { ...matched };
+        renderSelectedStation('destination', state.destination);
+      } else {
+        state.destination = null;
+        els.destinationInput.value = '';
+        els.destinationSelected.textContent = '현재 출발지에서 갈 수 있는 도착지를 선택하세요.';
+        els.destinationSelected.classList.remove('ready');
+      }
+    }
+    renderDirectionalSuggestions(els.destinationInput?.value || '');
+    updateDestinationFavoriteControl();
+    updateFindRoutesButton();
+    if (!silent) toast(`가는 방향 정류장 ${state.directionDestinations.length}개를 불러왔습니다.`);
+  } catch (error) {
+    if (error?.name === 'AbortError' || loadId !== state.directionLoadId) return;
+    state.directionDestinations = [];
+    state.directionLoading = false;
+    if (els.directionStatus) els.directionStatus.textContent = error.message;
+    if (els.destinationSuggestions) els.destinationSuggestions.innerHTML = `<div class="empty error">${esc(error.message)}</div>`;
+    if (els.destinationInput) {
+      els.destinationInput.disabled = true;
+      els.destinationInput.placeholder = '가는 방향을 불러오지 못했습니다';
+    }
+    if (destinationSearch) destinationSearch.disabled = true;
+  } finally {
+    if (loadId === state.directionLoadId) {
+      state.directionLoading = false;
+      state.directionAbortController = null;
+    }
   }
 }
 
@@ -700,13 +944,28 @@ async function searchStations(kind) {
   const input = kind === 'origin' ? els.originInput : els.destinationInput;
   const listEl = kind === 'origin' ? els.originSuggestions : els.destinationSuggestions;
   const keyword = input.value.trim();
+
+  if (kind === 'destination') {
+    if (!state.origin) return toast('출발지를 먼저 선택해 주세요.');
+    if (state.directionLoading) return toast('가는 방향 정류장을 불러오는 중입니다.');
+    renderDirectionalSuggestions(keyword);
+    return;
+  }
+
   if (!keyword) return toast('정류장 이름을 입력해 주세요.');
   listEl.innerHTML = '<div class="empty">검색 중…</div>';
   try {
     const { items } = await api('stationSearch', { keyword });
-    const filtered = items
-      .filter(item => String(item.regionName || '').includes('안양') || String(item.stationName || '').includes(keyword))
-      .slice(0, 15);
+    const filtered = (items || [])
+      .map(item => ({ ...item, ...coordinateFields(item) }))
+      .sort((a, b) => {
+        const aExact = normalizeName(a.stationName) === normalizeName(keyword) ? 0 : 1;
+        const bExact = normalizeName(b.stationName) === normalizeName(keyword) ? 0 : 1;
+        const aAnyang = String(a.regionName || '').includes('안양') ? 0 : 1;
+        const bAnyang = String(b.regionName || '').includes('안양') ? 0 : 1;
+        return aExact - bExact || aAnyang - bAnyang || String(a.stationName).localeCompare(String(b.stationName), 'ko-KR');
+      })
+      .slice(0, 20);
     renderStationSuggestions(kind, filtered);
   } catch (error) {
     listEl.innerHTML = `<div class="empty error">${esc(error.message)}</div>`;
@@ -961,11 +1220,26 @@ function selectStation(kind, station) {
   const previous = state[kind];
   const changed = !previous || !sameId(previous.stationId, station.stationId);
   if (changed && state.route) resetActiveRoute();
+
+  if (kind === 'origin' && changed) {
+    state.destination = null;
+    state.directionDestinations = [];
+    state.directionRoutes = [];
+    els.destinationInput.value = '';
+    els.destinationSelected.textContent = '가는 방향의 도착 정류장을 선택하세요.';
+    els.destinationSelected.classList.remove('ready');
+    clearDirectionalDestinations(`${station.stationName}에서 갈 수 있는 정류장을 확인합니다.`);
+    updateDestinationFavoriteControl();
+  }
+
   state[kind] = station;
   renderSelectedStation(kind, station);
   if (kind === 'destination') updateDestinationFavoriteControl();
+  updateFindRoutesButton();
   writeLastJourney();
-  toast(`${kind === 'origin' ? '탑승' : '도착'} 정류장을 선택했습니다.`);
+  toast(`${kind === 'origin' ? '출발' : '도착'} 정류장을 선택했습니다.`);
+
+  if (kind === 'origin') void loadDirectionalDestinations({ preserveDestination: false });
 }
 
 function stationCoordinate(selected) {
@@ -2414,7 +2688,7 @@ function soundPattern(sound = 'standard') {
   return patterns[sound] || patterns.standard;
 }
 
-const FUTURE_BUS_ALERT_URL = new URL('/assets/future-bus-alert.mp3?v=2.8.0', window.location.origin).href;
+const FUTURE_BUS_ALERT_URL = new URL('/assets/future-bus-alert.mp3?v=2.9.0', window.location.origin).href;
 let customAlertAudio = null;
 
 function getCustomAlertAudio() {
@@ -2721,7 +2995,7 @@ async function initFirebase() {
     if ('serviceWorker' in navigator) {
       try {
         state.swRegistration = await withTimeout(
-          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.8.0', { scope: '/' }),
+          navigator.serviceWorker.register('/api/firebase-messaging-sw?v=2.9.0', { scope: '/' }),
           8000,
           '서비스워커 연결 시간이 초과되었습니다.'
         );
@@ -2981,6 +3255,17 @@ function setupEvents() {
   $('originSearch').addEventListener('click', () => searchStations('origin'));
   els.nearbyOrigin.addEventListener('click', findNearbyOriginStations);
   $('destinationSearch').addEventListener('click', () => searchStations('destination'));
+  els.destinationInput.addEventListener('input', () => {
+    if (state.destination && els.destinationInput.value.trim() !== state.destination.stationName) {
+      state.destination = null;
+      els.destinationSelected.textContent = '목록에서 도착 정류장을 선택하세요.';
+      els.destinationSelected.classList.remove('ready');
+      updateDestinationFavoriteControl();
+      updateFindRoutesButton();
+      writeLastJourney();
+    }
+    renderDirectionalSuggestions(els.destinationInput.value);
+  });
   $('findRoutes').addEventListener('click', findRoutes);
   $('refreshLive').addEventListener('click', () => loadLive(true, { manual: true }));
   $('saveAlert').addEventListener('click', saveAlert);
@@ -2996,13 +3281,16 @@ function setupEvents() {
     document.querySelectorAll('[data-vehicle-scope]').forEach(item => item.classList.toggle('active', item === button));
     if (state.route) renderMap(true);
   }));
-  $('swapStops').addEventListener('click', () => {
+  $('swapStops')?.addEventListener('click', async () => {
+    if (!state.origin || !state.destination) return toast('출발지와 도착지를 모두 선택해 주세요.');
     resetActiveRoute();
     [state.origin, state.destination] = [state.destination, state.origin];
-    if (state.origin) renderSelectedStation('origin', state.origin);
-    if (state.destination) renderSelectedStation('destination', state.destination);
-    updateDestinationFavoriteControl();
+    renderSelectedStation('origin', state.origin);
+    renderSelectedStation('destination', state.destination);
     els.routeResults.innerHTML = '';
+    await loadDirectionalDestinations({ preserveDestination: true });
+    updateDestinationFavoriteControl();
+    updateFindRoutesButton();
     writeLastJourney();
   });
   document.querySelectorAll('.preset').forEach(button => button.addEventListener('click', () => {
@@ -3057,6 +3345,7 @@ async function boot() {
     || (storedJourney?.route ? storedJourney : null)
     || journeyFromNewestAlert()
     || storedJourney;
+
   if (savedJourney?.origin) {
     state.origin = savedJourney.origin;
     renderSelectedStation('origin', state.origin);
@@ -3069,17 +3358,18 @@ async function boot() {
   renderSavedAlerts();
   renderDestinationFavorites();
   updateDestinationFavoriteControl();
+  updateFindRoutesButton();
   startSavedAlertPolling();
   setupEvents();
-  // 첫 사용자 제스처에서는 실제 노래를 재생하지 않고 Web Audio 권한만 무음으로 준비한다.
+
   const primeAudio = event => {
-    // 테스트 버튼은 click 핸들러에서 선택한 알림음을 직접 재생한다.
     if (event?.target?.closest?.('#testAlert')) return;
     void unlockAudioFromGesture();
   };
   document.addEventListener('pointerdown', primeAudio, { once: true, capture: true, passive: true });
   document.addEventListener('keydown', primeAudio, { once: true, capture: true });
   initFirebase();
+
   try {
     await api('stationSearch', { keyword: '호계현대홈타운.e편한세상아파트' });
     updateApiState();
@@ -3087,11 +3377,17 @@ async function boot() {
     updateApiState(error);
   }
 
+  if (state.origin) {
+    await loadDirectionalDestinations({ preserveDestination: true, silent: true });
+  } else {
+    clearDirectionalDestinations();
+  }
+
   const restoredPair = savedJourney?.route && state.origin && state.destination
     ? pairFromStoredJourney(savedJourney)
     : null;
-  if (restoredPair) {
-    els.routeResults.innerHTML = '<div class="route-result-summary">마지막으로 보던 버스 노선을 복원했습니다.</div>';
+  if (restoredPair && destinationIsReachable(state.destination)) {
+    els.routeResults.innerHTML = '<div class="route-result-summary">마지막 노선을 복원했습니다.</div>';
     try {
       await chooseRoute(restoredPair, { restore: true });
       toast(`${state.route.routeName}번 노선을 다시 불러왔습니다.`);
@@ -3099,16 +3395,16 @@ async function boot() {
       console.warn('journey restore failed', error);
       resetActiveRoute();
       renderSavedAlerts();
-      els.routeResults.innerHTML = `<div class="empty error">마지막 노선 복원에 실패했습니다. 아래 저장 알림에서 ‘불러오기’를 눌러 주세요.<br><small>${esc(error.message)}</small></div>`;
+      els.routeResults.innerHTML = `<div class="empty error">마지막 노선을 복원하지 못했습니다.<br><small>${esc(error.message)}</small></div>`;
     }
     return;
   }
 
   if (state.origin && state.destination) {
-    els.routeResults.innerHTML = '<div class="route-result-summary">마지막 출발·도착 정류장을 복원했습니다. 직행 버스 찾기를 눌러 주세요.</div>';
-  } else {
-    if (!state.origin) setTimeout(() => searchStations('origin'), 250);
-    if (!state.destination) setTimeout(() => searchStations('destination'), 500);
+    els.routeResults.innerHTML = '<div class="route-result-summary">출발지와 도착지를 복원했습니다. 버스 찾기를 눌러 주세요.</div>';
+    updateFindRoutesButton();
+  } else if (!state.origin) {
+    setTimeout(() => searchStations('origin'), 250);
   }
 }
 
